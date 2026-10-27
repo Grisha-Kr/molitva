@@ -1,0 +1,1132 @@
+(() => {
+'use strict';
+const $ = s => document.querySelector(s);
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+/* ---------- Справочники ---------- */
+// Цвета камней: ключ хранится в базе (sections.color), ink = цвет подписи
+const COLORS = {
+  granite:{n:'Гранит', c:'#B3AB9F', ink:'light'}, moss:{n:'Мох', c:'#5F6E4A', ink:'light'},
+  clay:{n:'Глина', c:'#9A553F', ink:'light'}, slate:{n:'Сланец', c:'#5A7389', ink:'light'},
+  sand:{n:'Песчаник', c:'#D9C29A', ink:'dark'}, basalt:{n:'Базальт', c:'#4A4D52', ink:'light'},
+  marble:{n:'Мрамор', c:'#F2EEE6', ink:'dark'}, night:{n:'Ночь', c:'#3A3650', ink:'light'}
+};
+const PERIODS = {daily:['Каждый день', 1], every3:['Раз в 3 дня', 3], weekly:['Раз в неделю', 7], never:['Не менять', 0]};
+const VERSE_EPOCH = '2026-01-01'; // от этой даты считается смена стиха
+const MAX_VERSES = 7;
+const MB = 1024*1024;
+const MAX_PHOTO = 10*MB, MAX_FILE = 20*MB;
+const FILE_EXT = ['pdf','doc','docx','jpg','jpeg','png','gif','webp','heic','heif'];
+const PBN = {sections:'sections', needs:'needs', files:'need_files', prayers:'prayers', verses:'verses', days:'prayer_days'};
+const KEYS = Object.keys(PBN);
+
+/* ---------- Значки ---------- */
+const ICON = {
+  back: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 5l-7 7 7 7"/></svg>',
+  more: '<svg viewBox="0 0 24 24" aria-hidden="true"><circle class="fill" cx="5" cy="12" r="1.8"/><circle class="fill" cx="12" cy="12" r="1.8"/><circle class="fill" cx="19" cy="12" r="1.8"/></svg>',
+  plus: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>',
+  pen: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20h4L19 9l-4-4L4 16z"/></svg>',
+  lock: '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg>',
+  clip: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11.5l-8 8a5 5 0 0 1-7-7l8.5-8.5a3.3 3.3 0 0 1 4.7 4.7L9.7 17a1.7 1.7 0 0 1-2.4-2.4L15 7"/></svg>',
+  chev: '<svg class="chev" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg>',
+  check: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>',
+  candle: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3c1.6 2 2.2 3.1 2.2 4.1a2.2 2.2 0 0 1-4.4 0c0-1 .6-2.1 2.2-4.1z"/><rect x="8.5" y="11" width="7" height="10" rx="1.2"/></svg>',
+  photo: '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2"/><circle cx="9" cy="10" r="1.6"/><path d="M21 16l-5-5-9 8"/></svg>',
+  book: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5.5C4 4.7 4.7 4 5.5 4H11v16H5.5C4.7 20 4 19.3 4 18.5z M20 5.5C20 4.7 19.3 4 18.5 4H13v16h5.5c.8 0 1.5-.7 1.5-1.5z"/></svg>',
+  up: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 15l6-6 6 6"/></svg>',
+  down: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg>',
+  left: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 6l-6 6 6 6"/></svg>',
+  right: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg>',
+  dl: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v11M7 10l5 5 5-5M5 20h14"/></svg>',
+  trash: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/></svg>'
+};
+
+/* ---------- Состояние ---------- */
+const S = {sections:[], needs:[], files:[], prayers:[], verses:[], days:[], invites:[], usage:null, loaded:false};
+const loadLS = (k, d) => { try { const v = localStorage.getItem('mol_'+k); return v == null ? d : JSON.parse(v); } catch(e){ return d; } };
+const saveLS = (k, v) => { try { localStorage.setItem('mol_'+k, JSON.stringify(v)); } catch(e){} };
+const UI = {reorder:'', filesOpen:false, form:null, hops:0};
+const pb = new PocketBase(location.origin);
+pb.autoCancellation(false);
+const me = () => pb.authStore.record || {};
+const isAdmin = () => me().role === 'admin';
+
+/* ---------- Тема оформления: auto (как в системе), light, dark ---------- */
+const darkMQ = window.matchMedia('(prefers-color-scheme: dark)');
+function themePref(){ const t = loadLS('theme', 'auto'); return t === 'light' || t === 'dark' ? t : 'auto'; }
+function isDark(){ const t = themePref(); return t === 'dark' || (t === 'auto' && darkMQ.matches); }
+function applyTheme(){
+  const t = themePref(), root = document.documentElement;
+  if(t === 'auto') delete root.dataset.theme; else root.dataset.theme = t;
+  document.querySelectorAll('meta[name="theme-color"]').forEach(m => m.setAttribute('content', isDark() ? '#171815' : '#F2F0EB'));
+}
+// Тема запоминается на устройстве и в профиле, чтобы совпадала на телефоне и ноутбуке
+function setTheme(t){
+  saveLS('theme', t); applyTheme();
+  if(pb.authStore.isValid && me().theme !== t) pb.collection('users').update(me().id, {theme: t}).then(r => pb.authStore.save(pb.authStore.token, r)).catch(() => {});
+}
+function themeFromUser(){ const t = me().theme; if((t === 'auto' || t === 'light' || t === 'dark') && t !== themePref()){ saveLS('theme', t); applyTheme(); } }
+darkMQ.addEventListener && darkMQ.addEventListener('change', () => { if(themePref() === 'auto') applyTheme(); });
+applyTheme();
+
+/* ---------- Даты (день считается по часам устройства) ---------- */
+const pad = n => String(n).padStart(2, '0');
+const isoOf = d => `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`;
+const todayISO = () => isoOf(new Date());
+const dnum = iso => { const [y,m,d] = iso.split('-').map(Number); return Date.UTC(y, m-1, d) / 864e5; };
+const diff = iso => Math.round(dnum(todayISO()) - dnum(iso)); // сколько дней прошло
+const addDays = (iso, k) => { const [y,m,d] = iso.split('-').map(Number); return isoOf(new Date(y, m-1, d + k)); };
+const MONF = ['января','февраля','марта','апреля','мая','июня','июля','августа','сентября','октября','ноября','декабря'];
+const WD = ['Вс','Пн','Вт','Ср','Чт','Пт','Сб'];
+const WDF = ['Воскресенье','Понедельник','Вторник','Среда','Четверг','Пятница','Суббота'];
+function fmtDay(iso){
+  if(!iso) return '';
+  const [y,m,d] = iso.split('-').map(Number);
+  return d + ' ' + MONF[m-1] + (y !== new Date().getFullYear() ? ' ' + y : '');
+}
+const createdISO = r => r.created ? isoOf(new Date(String(r.created).replace(' ', 'T'))) : '';
+const plural = (n, f) => { n = Math.abs(n) % 100; const n1 = n % 10; if(n > 10 && n < 20) return f[2]; if(n1 > 1 && n1 < 5) return f[1]; if(n1 === 1) return f[0]; return f[2]; };
+const NEEDS = ['нужда','нужды','нужд'], SUBS = ['подраздел','подраздела','подразделов'], DAYS = ['день','дня','дней'];
+function prayedText(iso){
+  if(!iso) return 'Ещё не молился';
+  const k = diff(iso);
+  if(k <= 0) return 'Молился сегодня';
+  if(k === 1) return 'Молился вчера';
+  return `Молился ${k} ${plural(k, DAYS)} назад`;
+}
+const fsize = b => b < MB ? Math.max(1, Math.round(b/1024)) + ' КБ' : (b/MB).toFixed(1).replace('.', ',') + ' МБ';
+
+/* ---------- Доступ к данным ---------- */
+const byId = (key, id) => S[key].find(x => x.id === id);
+const bySort = (a, b) => (a.sort ?? 0) - (b.sort ?? 0) || String(a.created).localeCompare(String(b.created));
+const topSections = () => S.sections.filter(s => !s.parent).sort(bySort);
+const childrenOf = id => S.sections.filter(s => s.parent === id).sort(bySort);
+const needsIn = id => S.needs.filter(n => n.section === id);
+const needsTotal = s => needsIn(s.id).length + childrenOf(s.id).reduce((a, c) => a + needsIn(c.id).length, 0);
+const colorOf = s => COLORS[s && s.color] || COLORS.granite;
+function pathOf(sec){ const p = sec && sec.parent ? byId('sections', sec.parent) : null; return (p ? [p.name] : []).concat(sec ? [sec.name] : []); }
+const sortedVerses = () => [...S.verses].sort(bySort);
+const dayRec = iso => S.days.find(d => d.date === iso);
+// Нужды: сначала по дате последней молитвы (новые без молитв по дате добавления), отвеченные внизу
+function needSort(a, b){
+  const aa = !!a.answered_at, ba = !!b.answered_at;
+  if(aa !== ba) return aa ? 1 : -1;
+  if(aa) return String(b.answered_at).localeCompare(String(a.answered_at));
+  const ka = a.last_prayed_at || createdISO(a), kb = b.last_prayed_at || createdISO(b);
+  return kb.localeCompare(ka) || String(b.created).localeCompare(String(a.created));
+}
+
+const ID_ABC = 'abcdefghijklmnopqrstuvwxyz0123456789';
+function newId(){ const a = new Uint8Array(15); crypto.getRandomValues(a); return Array.from(a, x => ID_ABC[x % 36]).join(''); }
+const SKIP = new Set(['id','owner','user','collectionId','collectionName','created','updated','expand']);
+function clean(d){ const o = {}; for(const [k, v] of Object.entries(d || {})) if(!SKIP.has(k) && v !== undefined) o[k] = v; return o; }
+function upsert(key, rec){ const arr = S[key]; const i = arr.findIndex(x => x.id === rec.id); if(i >= 0) arr[i] = {...rec}; else arr.push({...rec}); schedule(); }
+function removeLocal(key, id){ S[key] = S[key].filter(x => x.id !== id); schedule(); }
+function col(key){
+  const c = pb.collection(PBN[key]);
+  return { doc(id){
+    const rid = id || newId();
+    return {
+      id: rid,
+      async create(data){ const rec = await c.create({...clean(data), id: rid, owner: me().id}); upsert(key, rec); return rec; },
+      async update(data){ const rec = await c.update(rid, clean(data)); upsert(key, rec); return rec; },
+      async delete(){ await c.delete(rid); removeLocal(key, rid); }
+    };
+  } };
+}
+async function loadAll(keys = KEYS){
+  const res = await Promise.all(keys.map(k => pb.collection(PBN[k]).getFullList({batch: 500})));
+  keys.forEach((k, n) => { S[k] = res[n]; });
+  schedule();
+}
+let subscribed = false;
+async function subscribeAll(){
+  if(subscribed) return; subscribed = true;
+  await pb.collection('users').subscribe(me().id, e => { if(e.action === 'update'){ pb.authStore.save(pb.authStore.token, e.record); themeFromUser(); schedule(); } });
+  for(const k of KEYS){
+    await pb.collection(PBN[k]).subscribe('*', e => { if(e.action === 'delete') removeLocal(k, e.record.id); else upsert(k, e.record); });
+  }
+}
+
+/* ---------- Запуск ---------- */
+async function boot(){
+  if('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {});
+  const invite = new URLSearchParams(location.search).get('invite');
+  if(invite) history.replaceState(null, '', location.pathname + location.hash);
+  if(!pb.authStore.isValid){ showAuth(invite ? 'register' : 'login', invite); return; }
+  try { await pb.collection('users').authRefresh(); }
+  catch(e){ if(e && e.status && e.status !== 0){ pb.authStore.clear(); showAuth('login'); return; } }
+  startApp();
+}
+async function startApp(){
+  $('#auth').hidden = true; $('#app').hidden = false;
+  themeFromUser();
+  render(true);
+  try {
+    await loadAll();
+    S.loaded = true; $('#notice').hidden = true; render(true);
+    if(route().name === 'profile') loadProfileExtras();
+    subscribeAll().catch(() => {});
+  } catch(e){
+    showNotice('Не удалось загрузить данные. ' + errText(e));
+  }
+}
+document.addEventListener('visibilitychange', () => {
+  if(document.visibilityState !== 'visible') return;
+  checkUpdate();
+  if(S.loaded && pb.authStore.isValid) loadAll().catch(() => {});
+});
+
+/* ---------- Проверка новой версии ---------- */
+// Сравниваем ?v= у app.js и app.css в открытой странице и в свежем index.html с сервера
+const verOf = html => (html.match(/\/app\.(?:js|css)\?v=\d+/g) || []).sort().join(' ');
+const MY_VER = verOf(document.documentElement.innerHTML);
+let lastCheck = 0;
+async function checkUpdate(){
+  if(!navigator.onLine || Date.now() - lastCheck < 60e3) return;
+  lastCheck = Date.now();
+  try {
+    const res = await fetch('/index.html', {cache: 'no-store'});
+    if(!res.ok) return;
+    const v = verOf(await res.text());
+    if(v && MY_VER && v !== MY_VER) $('#update-bar').hidden = false;
+  } catch(e){}
+}
+setInterval(checkUpdate, 30*60e3);
+$('#update-btn').addEventListener('click', () => location.reload());
+$('#update-close').addEventListener('click', () => { $('#update-bar').hidden = true; });
+window.addEventListener('online', () => { $('#notice').hidden = true; if(S.loaded) loadAll().catch(() => {}); });
+window.addEventListener('offline', () => showNotice('Нет подключения к интернету. Записи сохранятся, когда связь вернётся.'));
+let raf = 0;
+function schedule(){ if(raf) return; raf = requestAnimationFrame(() => { raf = 0; render(); }); }
+function showNotice(text){ $('#notice-text').textContent = text; $('#notice').hidden = false; }
+
+/* ---------- Адреса экранов: #/, #/s/ID, #/n/ID, #/new, #/edit/ID, #/verses, #/answers, #/profile ---------- */
+function route(){
+  const h = location.hash.replace(/^#\/?/, '');
+  const [path, q] = h.split('?');
+  const parts = path.split('/').filter(Boolean);
+  return {name: parts[0] || 'home', id: parts[1] || '', q: new URLSearchParams(q || '')};
+}
+const go = (hash, replace) => { if(replace) location.replace(hash); else location.hash = hash; };
+// Назад внутри приложения; если пришли по прямой ссылке, переходим на запасной адрес
+function goBack(fallback){ if(UI.hops > 0) history.back(); else go(fallback, true); }
+window.addEventListener('hashchange', () => { UI.hops++; UI.reorder = ''; UI.filesOpen = false; closeMenu(); render(true); window.scrollTo(0, 0); });
+
+/* ---------- Отрисовка ---------- */
+function render(force){
+  const r = route();
+  const tab = ['profile','verses','answers'].includes(r.name) ? 'profile' : 'diary';
+  document.querySelectorAll('.tab').forEach(t => t.setAttribute('aria-current', t.dataset.tab === tab ? 'page' : 'false'));
+  const m = $('#main');
+  if(!S.loaded){ m.innerHTML = '<div class="loading">Загружаю…</div>'; return; }
+  const isForm = r.name === 'new' || r.name === 'edit';
+  // форма раздела не перерисовывается от живых обновлений, чтобы не сбить ввод
+  if(isForm && !force && $('#f-name')) return;
+  if(!isForm) UI.form = null;
+  const views = {home:vHome, s:vSection, n:vNeed, new:vSectionForm, edit:vSectionForm, verses:vVerses, answers:vAnswers, profile:vProfile};
+  m.innerHTML = (views[r.name] || vHome)(r);
+}
+const notFound = () => `<div class="card"><p>Запись не найдена: возможно, её уже удалили.</p><a class="btn" href="#/">На главную</a></div>`;
+const backLink = (href, text) => `<a class="back" href="${href}">${ICON.back}<span>${esc(text)}</span></a>`;
+const initial = u => (String(u.name || u.email || '?').trim()[0] || '?').toUpperCase();
+
+/* ---------- Камни ---------- */
+const stoneBg = s => `background-color:${colorOf(s).c}`;
+function stoneHTML(s){
+  const c = colorOf(s), n = needsTotal(s);
+  const count = `${n} ${plural(n, NEEDS)}`;
+  return `<a class="stone-btn ink-${c.ink}" href="#/s/${esc(s.id)}" aria-label="${esc(s.name)}, ${count}">
+    <span class="stone-shadow" aria-hidden="true"></span><span class="stone" style="${stoneBg(s)}" aria-hidden="true"></span>
+    <span class="stone-name${String(s.name).length > 10 ? ' long' : ''}">${esc(s.name)}</span><span class="stone-count">${count}</span></a>`;
+}
+const addStone = (href, label) => `<a class="stone-btn add" href="${href}" aria-label="${label}"><span class="stone-shadow" aria-hidden="true"></span><span class="stone empty" aria-hidden="true"></span>${ICON.plus}</a>`;
+// Сетка камней; в режиме «Переставить» под каждым стрелки влево и вправо
+function stonesGrid(list, scope, addHref, addLabel){
+  const mode = UI.reorder === scope;
+  const cells = list.map((s, i) => mode
+    ? `<div class="stone-cell">${stoneHTML(s)}<div class="move"><button class="icon-btn" data-act="move" data-key="sections" data-scope="${scope}" data-id="${esc(s.id)}" data-dir="-1" aria-label="Переставить левее"${i ? '' : ' disabled'}>${ICON.left}</button><button class="icon-btn" data-act="move" data-key="sections" data-scope="${scope}" data-id="${esc(s.id)}" data-dir="1" aria-label="Переставить правее"${i < list.length - 1 ? '' : ' disabled'}>${ICON.right}</button></div></div>`
+    : stoneHTML(s)).join('');
+  const add = addHref && !mode ? addStone(addHref, addLabel) : '';
+  const toggle = list.length > 1 ? `<div class="row-actions"><button class="btn ghost sm" data-act="reorder" data-scope="${scope}">${mode ? 'Готово' : 'Переставить камни'}</button></div>` : '';
+  return `<div class="stones">${cells}${add}</div>${toggle}`;
+}
+
+/* ---------- Главная ---------- */
+function currentVerse(){
+  const list = sortedVerses();
+  if(!list.length) return null;
+  const p = PERIODS[me().verse_period] || PERIODS.daily;
+  let i = 0;
+  if(p[1] > 0 && list.length > 1){ const days = Math.round(dnum(todayISO()) - dnum(VERSE_EPOCH)); i = ((Math.floor(days / p[1]) % list.length) + list.length) % list.length; }
+  return {v: list[i], i, n: list.length};
+}
+function vHome(){
+  const cv = currentVerse();
+  const verse = cv
+    ? `<a class="verse" href="#/verses"><span class="top"><span>Мой стих</span>${cv.n > 1 ? `<span>${cv.i + 1} из ${cv.n}</span>` : ''}</span><span class="text">${esc(cv.v.text)}</span>${cv.v.ref ? `<span class="ref">${esc(cv.v.ref)}</span>` : ''}</a>`
+    : `<button type="button" class="verse empty-verse" data-act="new-verse"><span class="top"><span>Мой стих</span></span><span class="text">Нажмите, чтобы вписать стих, который хотите держать перед глазами</span></button>`;
+  const t = todayISO(), now = new Date();
+  let done = 0;
+  const days = [6,5,4,3,2,1,0].map(k => {
+    const iso = addDays(t, -k), on = !!dayRec(iso);
+    if(on) done++;
+    const [y,m,d] = iso.split('-').map(Number);
+    return `<div class="day${on ? ' on' : ''}${k === 0 ? ' today' : ''}" title="${fmtDay(iso)}${on ? ', молился' : ''}"><span>${WD[new Date(y, m-1, d).getDay()]}</span><i></i></div>`;
+  }).join('');
+  const marked = !!dayRec(t);
+  const week = `<section class="card"><div class="week-top"><b>${WDF[now.getDay()]}, ${now.getDate()} ${MONF[now.getMonth()]}</b><span>${done} из 7 дней</span></div>
+    <div class="week" aria-label="Последние 7 дней: молился ${done} из 7">${days}</div>
+    <button type="button" class="btn big wide ${marked ? 'outline' : 'primary'}" data-act="today" aria-pressed="${marked}">${marked ? 'Отмечено: сегодня молился' : 'Сегодня молился'}</button></section>`;
+  const tops = topSections();
+  return `<header class="head"><h1>Молитвенный дневник</h1><a class="me" href="#/profile" aria-label="Профиль">${esc(initial(me()))}</a></header>
+    ${verse}${week}
+    <h2 class="label">Мои разделы</h2>
+    ${stonesGrid(tops, 'home', '#/new', 'Создать раздел')}
+    ${tops.length ? '' : '<p class="hint">Нажмите на камень, чтобы создать первый раздел: назовите его и выберите цвет.</p>'}`;
+}
+
+/* ---------- Раздел ---------- */
+function needRow(n){
+  const src = photoSrc(n, '120x120');
+  const pic = n.photo && src ? `<img src="${esc(src)}" alt="">` : (n.answered_at ? ICON.check : ICON.candle);
+  const first = String(n.description || '').split('\n').find(x => x.trim()) || '';
+  const when = n.answered_at ? `<span class="pill">Отвечено ${fmtDay(n.answered_at)}</span>` : `<span class="when">${prayedText(n.last_prayed_at)}</span>`;
+  return `<a class="need-row${n.answered_at ? ' answered' : ''}" href="#/n/${esc(n.id)}"><span class="pic${n.answered_at && !(n.photo && src) ? ' ok' : ''}" aria-hidden="true">${pic}</span>
+    <span class="txt"><b>${esc(n.title)}</b>${first ? `<span class="desc">${esc(first)}</span>` : ''}${when}</span></a>`;
+}
+function vSection(r){
+  const s = byId('sections', r.id);
+  if(!s) return notFound();
+  const parent = s.parent ? byId('sections', s.parent) : null;
+  const subs = parent ? [] : childrenOf(s.id);
+  const needs = needsIn(s.id).sort(needSort);
+  const counter = [subs.length ? `${subs.length} ${plural(subs.length, SUBS)}` : '', `${needs.length} ${plural(needs.length, NEEDS)}`].filter(Boolean).join(' · ');
+  return `<div class="nav-head">${parent ? backLink('#/s/' + esc(parent.id), parent.name) : backLink('#/', 'Главная')}
+      <button type="button" class="icon-btn" data-act="sec-menu" data-id="${esc(s.id)}" aria-label="Действия с разделом: изменить, удалить" aria-haspopup="menu">${ICON.more}</button></div>
+    <div class="sec-title"><span class="mini" aria-hidden="true"><span class="stone" style="${stoneBg(s)}"></span></span><div><h1>${esc(s.name)}</h1><span>${counter}</span></div></div>
+    ${parent ? '' : `<h2 class="label">Подразделы</h2>${stonesGrid(subs, 's:' + s.id, '#/new?in=' + esc(s.id), 'Создать подраздел')}`}
+    <h2 class="label">Нужды</h2>
+    ${needs.length ? `<div class="needs">${needs.map(needRow).join('')}</div>` : '<p class="hint">Здесь будут нужды этого раздела: люди, просьбы, события.</p>'}
+    <button type="button" class="dashed" data-act="new-need" data-id="${esc(s.id)}">+ Добавить нужду</button>`;
+}
+
+/* ---------- Нужда ---------- */
+function vNeed(r){
+  const n = byId('needs', r.id);
+  if(!n) return notFound();
+  const sec = byId('sections', n.section);
+  const t = todayISO();
+  const src = n.photo ? photoSrc(n, '800x0') : '';
+  const photo = n.photo
+    ? `<button type="button" class="photo" data-act="view-photo" data-id="${esc(n.id)}" aria-label="Открыть фото крупно">${src ? `<img src="${esc(src)}" alt="">` : ''}</button>`
+    : `<label class="photo-add upload" for="np-input">${ICON.photo}<span>Добавить фото (по желанию)</span><input type="file" id="np-input" accept="image/*,.heic,.heif"></label>`;
+  const prayedToday = n.last_prayed_at === t;
+  const prayers = S.prayers.filter(p => p.need === n.id).sort((a, b) => String(b.date).localeCompare(String(a.date)) || String(b.created).localeCompare(String(a.created)));
+  const files = S.files.filter(f => f.need === n.id).sort((a, b) => String(b.created).localeCompare(String(a.created)));
+  const meta = ['С ' + fmtDay(createdISO(n)), n.answered_at ? '' : prayedText(n.last_prayed_at).toLowerCase()].filter(Boolean).join(' · ');
+  return `<div class="nav-head">${backLink('#/s/' + esc(n.section), pathOf(sec).join(' › ') || 'Раздел')}
+      <button type="button" class="icon-btn" data-act="need-menu" data-id="${esc(n.id)}" aria-label="Действия с нуждой: изменить, перенести, удалить" aria-haspopup="menu">${ICON.more}</button></div>
+    ${photo}
+    <div class="need-head"><h1>${esc(n.title)}</h1><span>${esc(meta)}</span></div>
+    ${n.description ? `<p class="prose">${esc(n.description)}</p>` : ''}
+    <div class="btn-row">
+      <button type="button" class="btn ${prayedToday ? 'soft' : 'primary'}" data-act="prayed" data-id="${esc(n.id)}">${prayedToday ? 'Молился сегодня' : 'Помолился'}</button>
+      <button type="button" class="btn ${n.answered_at ? 'soft' : 'outline'}" data-act="answered" data-id="${esc(n.id)}">${n.answered_at ? ICON.check : ''}Отвечено</button>
+    </div>
+    ${n.answered_at ? `<div class="answer"><b>Отвечено ${fmtDay(n.answered_at)}</b>${n.answer_note ? `<p>${esc(n.answer_note)}</p>` : ''}</div>` : ''}
+    <h2 class="label">Мои молитвы <span class="side">${ICON.lock}видно только вам</span></h2>
+    ${prayers.length ? `<div class="entries">${prayers.map(p => `<button type="button" class="entry" data-act="edit-prayer" data-id="${esc(p.id)}"><small>${fmtDay(p.date)}</small><span>${esc(p.text)}</span></button>`).join('')}</div>` : ''}
+    <button type="button" class="dashed" data-act="new-prayer" data-id="${esc(n.id)}">+ Записать молитву</button>
+    <details class="fold" id="files-fold"${UI.filesOpen ? ' open' : ''}><summary><span>${ICON.clip}Файлы · ${files.length}</span>${ICON.chev}</summary>
+      <div class="fold-body">
+        ${files.length ? `<div>${files.map(fileRow).join('')}</div>` : '<p class="hint">Документы и картинки к этой нужде. Их видите только вы.</p>'}
+        <label class="btn sm upload" for="nf-input" style="align-self:flex-start">${ICON.clip}Прикрепить файл<input type="file" id="nf-input" multiple accept="${FILE_EXT.map(x => '.' + x).join(',')},image/*"></label>
+        <p class="hint" style="font-size:12.5px">PDF, Word (doc, docx) и картинки, до 20 МБ каждый.</p>
+      </div></details>`;
+}
+
+/* ---------- Новый раздел и изменение раздела ---------- */
+function formInit(r){
+  if(UI.form && UI.form.key === location.hash) return UI.form;
+  const s = r.name === 'edit' ? byId('sections', r.id) : null;
+  const inId = r.q.get('in');
+  const inSec = inId ? byId('sections', inId) : null;
+  UI.form = s
+    ? {key: location.hash, id: s.id, name: s.name, color: s.color || 'granite', place: s.parent ? 'inside' : 'home', parent: s.parent || ''}
+    : {key: location.hash, id: '', name: '', color: 'granite', place: inSec && !inSec.parent ? 'inside' : 'home', parent: inSec && !inSec.parent ? inSec.id : ''};
+  return UI.form;
+}
+function vSectionForm(r){
+  if(r.name === 'edit' && !byId('sections', r.id)) return notFound();
+  const f = formInit(r);
+  const c = COLORS[f.color] || COLORS.granite;
+  const hasSubs = f.id && childrenOf(f.id).length > 0;
+  const cands = topSections().filter(s => s.id !== f.id);
+  const canInside = !hasSubs && cands.length > 0;
+  if(f.place === 'inside' && !canInside) f.place = 'home';
+  if(f.place === 'inside' && !cands.some(s => s.id === f.parent)) f.parent = cands[0].id;
+  const sw = Object.entries(COLORS).map(([k, v]) => `<button type="button" class="swatch" data-act="pick-color" data-color="${k}" aria-label="${v.n}" aria-pressed="${k === f.color}"><span><span class="stone" style="background-color:${v.c}" aria-hidden="true"></span></span></button>`).join('');
+  const why = hasSubs ? 'У раздела есть подразделы, поэтому он остаётся на главной.' : !cands.length ? 'Внутрь можно положить, когда на главной появится другой раздел.' : '';
+  const parents = f.place === 'inside' ? `<div class="parents" role="radiogroup" aria-label="Внутри какого раздела">${cands.map(s => `<label><input type="radio" name="f-parent" value="${esc(s.id)}"${s.id === f.parent ? ' checked' : ''}><span class="dot" aria-hidden="true"><span class="stone" style="${stoneBg(s)}"></span></span><span>${esc(s.name)}</span></label>`).join('')}</div>` : '';
+  return `<div class="form-head"><button type="button" class="back" data-act="cancel-form">Отмена</button><h1>${f.id ? 'Изменить раздел' : 'Новый раздел'}</h1><span></span></div>
+    <div class="preview ink-${c.ink}" id="pv"><span class="stone-shadow" aria-hidden="true"></span><span class="stone" id="pv-stone" style="background-color:${c.c}" aria-hidden="true"></span><span class="pv-name" id="pv-name">${esc(f.name || 'Название')}</span></div>
+    <div class="field"><label for="f-name">Название</label><input id="f-name" type="text" maxlength="100" autocomplete="off" placeholder="Например, Семья" value="${esc(f.name)}"></div>
+    <div class="field"><span class="flabel" id="f-color-l">Цвет камня: ${c.n}</span><div class="swatches">${sw}</div></div>
+    <div class="field"><span class="flabel">Где будет раздел</span>
+      <div class="choice"><button type="button" data-act="place" data-place="home" aria-pressed="${f.place === 'home'}">На главной</button><button type="button" data-act="place" data-place="inside" aria-pressed="${f.place === 'inside'}"${canInside ? '' : ' disabled'}>Внутри раздела</button></div>
+      ${parents}${why ? `<p class="hint">${why}</p>` : ''}</div>
+    <p class="form-err" id="f-err" hidden></p>
+    <button type="button" class="btn primary big wide" data-act="save-section">${f.id ? 'Сохранить' : 'Создать раздел'}</button>`;
+}
+async function saveSection(btn){
+  const f = UI.form; if(!f) return;
+  const err = $('#f-err');
+  f.name = ($('#f-name')?.value || '').trim();
+  if(!f.name){ err.textContent = 'Введите название раздела.'; err.hidden = false; $('#f-name').focus(); return; }
+  const parent = f.place === 'inside' ? f.parent : '';
+  btn.disabled = true;
+  try {
+    if(f.id){
+      const old = byId('sections', f.id);
+      const data = {name: f.name, color: f.color, parent};
+      if((old.parent || '') !== parent) data.sort = nextSort(S.sections.filter(s => (s.parent || '') === parent));
+      await col('sections').doc(f.id).update(data);
+      toast('Раздел сохранён');
+    } else {
+      await col('sections').doc().create({name: f.name, color: f.color, parent, sort: nextSort(S.sections.filter(s => (s.parent || '') === parent))});
+      toast('Раздел создан');
+    }
+    UI.form = null;
+    goBack(parent ? '#/s/' + parent : '#/');
+  } catch(e){ err.textContent = errText(e); err.hidden = false; btn.disabled = false; }
+}
+const nextSort = list => list.reduce((m, x) => Math.max(m, x.sort ?? 0), -1) + 1;
+
+/* ---------- Мои стихи ---------- */
+function vVerses(){
+  const list = sortedVerses(), cv = currentVerse(), per = me().verse_period || 'daily';
+  const mode = UI.reorder === 'verses';
+  const items = list.map((v, i) => `<div class="verse-item${cv && cv.v.id === v.id ? ' current' : ''}"><div class="vi">
+      ${cv && cv.v.id === v.id ? '<span class="pill">Сейчас на главной</span>' : ''}<span class="vt">${esc(v.text)}</span>${v.ref ? `<span class="vr">${esc(v.ref)}</span>` : ''}</div>
+      ${mode ? `<div class="vbtns"><button class="icon-btn" data-act="move" data-key="verses" data-scope="verses" data-id="${esc(v.id)}" data-dir="-1" aria-label="Выше"${i ? '' : ' disabled'}>${ICON.up}</button><button class="icon-btn" data-act="move" data-key="verses" data-scope="verses" data-id="${esc(v.id)}" data-dir="1" aria-label="Ниже"${i < list.length - 1 ? '' : ' disabled'}>${ICON.down}</button></div>`
+        : `<button type="button" class="icon-btn" data-act="edit-verse" data-id="${esc(v.id)}" aria-label="Изменить стих${v.ref ? ': ' + esc(v.ref) : ''}">${ICON.pen}</button>`}</div>`).join('');
+  return `<div class="nav-head">${backLink('#/profile', 'Профиль')}</div>
+    <div><h1 class="title">Мои стихи</h1><p class="lead">Стих на главной меняется по кругу. Можно вписать до ${MAX_VERSES} стихов.</p></div>
+    <section class="card"><h2>Менять стих</h2><div class="choice four">${Object.entries(PERIODS).map(([k, p]) => `<button type="button" data-act="period" data-period="${k}" aria-pressed="${k === per}">${p[0]}</button>`).join('')}</div></section>
+    <h2 class="label">Стихи <span class="side">${list.length} из ${MAX_VERSES}</span></h2>
+    ${list.length ? `<div class="entries">${items}</div>` : '<p class="hint">Стихов пока нет. Впишите стих, который хотите держать перед глазами.</p>'}
+    ${list.length > 1 ? `<div class="row-actions"><button class="btn ghost sm" data-act="reorder" data-scope="verses">${mode ? 'Готово' : 'Переставить'}</button></div>` : ''}
+    <button type="button" class="dashed" data-act="new-verse"${list.length >= MAX_VERSES ? ' disabled' : ''}>${list.length >= MAX_VERSES ? `Вписано ${MAX_VERSES} из ${MAX_VERSES} стихов` : `+ Добавить стих (${list.length} из ${MAX_VERSES})`}</button>`;
+}
+
+/* ---------- Ответы на молитвы ---------- */
+function vAnswers(){
+  const list = S.needs.filter(n => n.answered_at).sort((a, b) => String(b.answered_at).localeCompare(String(a.answered_at)));
+  return `<div class="nav-head">${backLink('#/profile', 'Профиль')}</div>
+    <div><h1 class="title">Ответы на молитвы</h1><p class="lead">Нужды, которые вы отметили как отвеченные, по дате ответа.</p></div>
+    ${list.length ? `<div class="answers">${list.map(n => `<a class="ans" href="#/n/${esc(n.id)}"><small>${fmtDay(n.answered_at)} · ${esc(pathOf(byId('sections', n.section)).join(' › '))}</small><b>${esc(n.title)}</b>${n.answer_note ? `<p>${esc(n.answer_note)}</p>` : ''}</a>`).join('')}</div>`
+      : '<p class="hint">Когда вы отметите нужду кнопкой «Отвечено», она появится здесь.</p>'}`;
+}
+
+/* ---------- Профиль ---------- */
+function vProfile(){
+  const u = me();
+  const answered = S.needs.filter(n => n.answered_at).length;
+  const inv = S.invites.slice().sort((a, b) => String(b.created).localeCompare(String(a.created)));
+  const usage = S.usage ? `<p class="hint">Фото и файлы занимают ${fsize(S.usage.used || 1)} из ${Math.round(S.usage.quota / MB)} МБ.</p>` : '';
+  return `<header class="head"><h1>Профиль</h1></header>
+    <section class="card me-card"><span class="me" aria-hidden="true">${esc(initial(u))}</span><div class="who"><b>${esc(u.name || 'Без имени')}</b><span>${esc(u.email || '')}</span></div>
+      <button type="button" class="icon-btn" data-act="edit-name" aria-label="Изменить имя">${ICON.pen}</button></section>
+    <nav class="links" aria-label="Мои записи">
+      <a href="#/verses">${ICON.book}Мои стихи<span class="n">${S.verses.length} из ${MAX_VERSES}</span>${ICON.chev}</a>
+      <a href="#/answers">${ICON.check}Ответы на молитвы<span class="n">${answered}</span>${ICON.chev}</a>
+    </nav>
+    <section class="card"><h2>Оформление</h2>
+      <div class="seg3" role="radiogroup" aria-label="Тема">${[['light','Светлая'],['dark','Тёмная'],['auto','Как в системе']].map(([k, l]) =>
+        `<input type="radio" name="p-theme" id="p-theme-${k}" value="${k}"${themePref() === k ? ' checked' : ''}><label for="p-theme-${k}">${l}</label>`).join('')}</div></section>
+    ${isAdmin() ? `<details class="fold"><summary><span>Приглашения</span>${ICON.chev}</summary><div class="fold-body">
+      <p class="hint">Новый человек может зарегистрироваться только по приглашению. Создайте его и отправьте ссылку.</p>
+      <div class="field"><label for="i-note">Для кого (заметка)</label><input type="text" id="i-note" placeholder="Например: мама"></div>
+      <div class="field"><label for="i-max">Сколько регистраций</label><select id="i-max"><option value="1">1 человек</option><option value="5">до 5 человек</option><option value="20">до 20 человек</option><option value="0">без ограничения</option></select></div>
+      <div class="field"><label for="i-exp">Действует до (необязательно)</label><input type="date" id="i-exp"></div>
+      <button type="button" class="btn primary" data-act="new-invite">Создать и скопировать ссылку</button>
+      <div>${inv.length ? inv.map(i => `<div class="inv"><code>${esc(i.code)}</code><span class="muted">${i.note ? esc(i.note) + ' · ' : ''}использовано ${i.uses || 0}${i.max_uses > 0 ? ' из ' + i.max_uses : ', без ограничения'}${i.expires ? ' · до ' + fmtDay(i.expires) : ''}</span>
+        <div class="acts"><button type="button" class="btn sm" data-act="copy-invite" data-code="${esc(i.code)}">Скопировать ссылку</button><button type="button" class="btn sm ghost danger" data-act="del-invite" data-id="${esc(i.id)}">Удалить</button></div></div>`).join('') : '<p class="hint">Приглашений пока нет.</p>'}</div>
+    </div></details>` : ''}
+    <details class="fold"><summary><span>Сменить пароль</span>${ICON.chev}</summary><div class="fold-body">
+      <div class="field"><label for="p-old">Текущий пароль</label><input type="password" id="p-old" autocomplete="current-password"></div>
+      <div class="field"><label for="p-new">Новый пароль (не короче 8 символов)</label><input type="password" id="p-new" autocomplete="new-password"></div>
+      <div class="field"><label for="p-new2">Повторите новый</label><input type="password" id="p-new2" autocomplete="new-password"></div>
+      <button type="button" class="btn" data-act="save-pass">Сменить пароль</button></div></details>
+    ${usage}
+    <button type="button" class="btn wide" data-act="logout">Выйти</button>
+    <details class="fold"><summary><span>Удаление аккаунта</span>${ICON.chev}</summary><div class="fold-body">
+      <p class="hint">Вместе с аккаунтом удалятся все разделы, нужды, записи молитв, стихи, фото и файлы. Вернуть их будет нельзя.</p>
+      <button type="button" class="btn danger" data-act="delete-account">Удалить аккаунт и все данные</button></div></details>
+    <p class="hint"><a href="/privacy.html" target="_blank" rel="noopener">Политика конфиденциальности</a></p>`;
+}
+async function loadProfileExtras(){
+  try { S.usage = await pb.send('/api/molitva/usage', {}); } catch(e){}
+  if(isAdmin()){ try { S.invites = await pb.collection('invites').getFullList(); } catch(e){} }
+  if(route().name === 'profile') schedule();
+}
+window.addEventListener('hashchange', () => { if(route().name === 'profile' && S.loaded) loadProfileExtras(); });
+
+/* ---------- Фото нужд и файлы: защищённые, открываются по токену ---------- */
+let tokP = null, tokAt = 0;
+function fileToken(){
+  if(!tokP || Date.now() - tokAt > 100e3){ tokAt = Date.now(); tokP = pb.files.getToken().catch(e => { tokP = null; throw e; }); }
+  return tokP;
+}
+// Фото загружаем один раз и держим в памяти: токен в ссылке живёт недолго
+const PH = new Map();
+function photoSrc(n, thumb){
+  if(!n.photo) return '';
+  const k = n.id + '/' + n.photo + '/' + (thumb || '');
+  const v = PH.get(k);
+  if(v && v !== 'loading' && v !== 'err') return v;
+  if(!v){ PH.set(k, 'loading'); loadPhoto(n, thumb, k); }
+  return '';
+}
+async function loadPhoto(n, thumb, k){
+  try {
+    const token = await fileToken();
+    const res = await fetch(pb.files.getURL(n, n.photo, thumb ? {thumb, token} : {token}));
+    if(!res.ok) throw new Error('Фото не загрузилось.');
+    PH.set(k, URL.createObjectURL(await res.blob()));
+    schedule();
+  } catch(e){ PH.set(k, 'err'); }
+}
+// Фото уменьшаем в браузере до 1600 точек по длинной стороне и сохраняем как JPEG
+async function preparePhoto(file){
+  const ext = (file.name.split('.').pop() || '').toLowerCase();
+  let img;
+  try { img = await createImageBitmap(file); }
+  catch(e){
+    try { img = await new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = rej; i.src = URL.createObjectURL(file); }); }
+    catch(e2){
+      // HEIC открывается не во всех браузерах: тогда сохраняем как есть
+      if(['heic','heif'].includes(ext) && file.size <= MAX_PHOTO) return file;
+      throw new Error('Не удалось открыть картинку. Выберите фото в формате JPG или PNG.');
+    }
+  }
+  const k = Math.min(1, 1600 / Math.max(img.width, img.height));
+  const cv = document.createElement('canvas');
+  cv.width = Math.round(img.width * k); cv.height = Math.round(img.height * k);
+  cv.getContext('2d').drawImage(img, 0, 0, cv.width, cv.height);
+  const blob = await new Promise(res => cv.toBlob(res, 'image/jpeg', 0.86));
+  if(!blob) throw new Error('Не удалось обработать фото.');
+  if(blob.size > MAX_PHOTO) throw new Error('Фото больше 10 МБ.');
+  return new File([blob], 'photo.jpg', {type: 'image/jpeg'});
+}
+async function setNeedPhoto(n, file){
+  toast('Сохраняю фото…');
+  try { const ph = await preparePhoto(file); await col('needs').doc(n.id).update({photo: ph}); toast('Фото сохранено'); }
+  catch(e){ toast(errText(e)); }
+}
+function fileRow(f){
+  const ext = (f.ext || String(f.name || '').split('.').pop() || '').slice(0, 4);
+  const meta = [f.size ? fsize(f.size) : '', fmtDay(createdISO(f))].filter(Boolean).join(' · ');
+  const id = esc(f.id);
+  const name = viewKind(f) ? `<button type="button" class="fname" data-act="view-file" data-id="${id}">${esc(f.name)}</button>` : `<b>${esc(f.name)}</b>`;
+  return `<div class="file"><span class="file-ext">${esc(ext)}</span><div class="file-main">${name}<span>${meta}</span></div>
+    <button type="button" class="icon-btn" data-act="dl-file" data-id="${id}" aria-label="Скачать ${esc(f.name)}">${ICON.dl}</button>
+    <button type="button" class="icon-btn" data-act="del-file" data-id="${id}" aria-label="Удалить ${esc(f.name)}">${ICON.trash}</button></div>`;
+}
+async function uploadFile(file, needId){
+  const ext = (file.name.split('.').pop() || '').toLowerCase();
+  if(!FILE_EXT.includes(ext)) throw new Error(`Формат .${ext || '?'} не подходит. Можно PDF, Word (doc, docx) и картинки.`);
+  if(file.size > MAX_FILE) throw new Error(`«${file.name}» больше 20 МБ.`);
+  const rec = await pb.collection('need_files').create({id: newId(), owner: me().id, need: needId, name: file.name, ext, file});
+  upsert('files', rec);
+}
+function viewKind(f){
+  const ext = String(f.ext || String(f.name || '').split('.').pop() || '').toLowerCase();
+  if(ext === 'pdf') return 'pdf';
+  if(ext === 'docx') return 'docx';
+  if(['png','jpg','jpeg','gif','webp'].includes(ext)) return 'img';
+  return '';
+}
+async function fileUrl(f, download){
+  const q = {token: await fileToken()};
+  if(download) q.download = 1;
+  return pb.files.getURL(f, f.file, q);
+}
+async function getBlob(f){
+  const res = await fetch(await fileUrl(f));
+  if(!res.ok) throw new Error('Файл не найден на сервере.');
+  return await res.blob();
+}
+const libs = {};
+function loadLib(src, global){
+  if(window[global]) return Promise.resolve(window[global]);
+  if(!libs[src]) libs[src] = new Promise((res, rej) => {
+    const sc = document.createElement('script');
+    sc.src = src;
+    sc.onload = () => window[global] ? res(window[global]) : rej(new Error('Модуль не загрузился.'));
+    sc.onerror = () => { delete libs[src]; rej(new Error('Не удалось загрузить модуль. Проверьте интернет.')); };
+    document.head.appendChild(sc);
+  });
+  return libs[src];
+}
+const viewer = $('#viewer');
+let viewing = null, viewDl = null;
+let pdfView = null; // открытый PDF: документ и наблюдатель за страницами
+function closePdf(){ if(pdfView){ pdfView.obs.disconnect(); pdfView.doc.destroy(); pdfView = null; } $('#v-body').className = 'v-body'; }
+$('#v-close').addEventListener('click', () => viewer.close());
+$('#v-dl').addEventListener('click', () => viewDl && viewDl());
+viewer.addEventListener('close', () => { viewing = null; viewDl = null; closePdf(); $('#v-body').innerHTML = ''; });
+// PDF показываем сами через pdf.js: сервер отдаёт файлы с CSP sandbox, и встроенный
+// просмотрщик Chrome в новой вкладке не запускается (пустая вкладка и скачивание).
+async function loadPdfJs(){
+  const lib = await import('/vendor/pdfjs/pdf.min.mjs');
+  lib.GlobalWorkerOptions.workerSrc = '/vendor/pdfjs/pdf.worker.min.mjs';
+  return lib;
+}
+async function showPdf(f, body){
+  const [lib, blob] = await Promise.all([loadPdfJs(), getBlob(f)]);
+  const doc = await lib.getDocument({data: new Uint8Array(await blob.arrayBuffer()), standardFontDataUrl: '/vendor/pdfjs/standard_fonts/', cMapUrl: '/vendor/pdfjs/cmaps/', cMapPacked: true}).promise;
+  if(viewing !== f){ doc.destroy(); return; }
+  const first = (await doc.getPage(1)).getViewport({scale: 1});
+  body.classList.add('is-pdf');
+  body.innerHTML = Array.from({length: doc.numPages}, (_, n) => `<div class="pdf-page" data-n="${n + 1}" style="aspect-ratio:${first.width}/${first.height}"><span>${n + 1}</span></div>`).join('');
+  // Страницы рисуются, когда до них доходит прокрутка: большой файл не съест память телефона
+  const draw = async el => {
+    const page = await doc.getPage(+el.dataset.n);
+    const vp1 = page.getViewport({scale: 1});
+    const ratio = Math.min(window.devicePixelRatio || 1, 2);
+    const vp = page.getViewport({scale: el.clientWidth / vp1.width * ratio});
+    const cv = document.createElement('canvas');
+    cv.width = Math.floor(vp.width); cv.height = Math.floor(vp.height);
+    el.style.aspectRatio = `${vp1.width}/${vp1.height}`;
+    await page.render({canvasContext: cv.getContext('2d'), viewport: vp}).promise;
+    el.replaceChildren(cv);
+  };
+  const obs = new IntersectionObserver(entries => entries.forEach(e => {
+    if(!e.isIntersecting) return;
+    obs.unobserve(e.target);
+    draw(e.target).catch(() => { e.target.textContent = 'Страница не открылась'; });
+  }), {root: body, rootMargin: '600px 0px'});
+  pdfView = {doc, obs};
+  body.querySelectorAll('.pdf-page').forEach(el => obs.observe(el));
+}
+function startView(title, item, dl){
+  closePdf();
+  viewing = item; viewDl = dl;
+  $('#v-title').textContent = title;
+  const body = $('#v-body');
+  body.innerHTML = '<div class="v-msg">Открываю…</div>';
+  if(!viewer.open) viewer.showModal();
+  return body;
+}
+async function openFile(f){
+  const kind = viewKind(f);
+  const body = startView(f.name, f, () => downloadFile(f));
+  try{
+    if(kind === 'pdf'){ await showPdf(f, body); return; }
+    if(kind === 'img'){ const url = URL.createObjectURL(await getBlob(f)); if(viewing === f){ body.classList.add('is-img'); body.innerHTML = `<img class="v-img" src="${esc(url)}" alt="${esc(f.name)}">`; } return; }
+    if(kind === 'docx'){
+      const [m, blob] = await Promise.all([loadLib('/vendor/mammoth.browser.min.js', 'mammoth'), getBlob(f)]);
+      const r = await m.convertToHtml({arrayBuffer: await blob.arrayBuffer()});
+      if(viewing !== f) return;
+      const html = (r.value || '').replace(/<script[\s\S]*?<\/script>/gi, '').replace(/\son\w+\s*=/gi, ' data-x=');
+      body.innerHTML = html.trim() ? `<article class="doc-view">${html}</article>` : '<div class="v-msg">Документ пустой.</div>';
+      return;
+    }
+    body.innerHTML = '<div class="v-msg">Этот формат здесь не просматривается. Скачайте файл и откройте его на устройстве.</div>';
+  }catch(e){
+    if(viewing === f) body.innerHTML = `<div class="v-msg">${esc(errText(e))}<span>Попробуйте скачать файл кнопкой вверху.</span></div>`;
+  }
+}
+async function openPhoto(n){
+  const body = startView(n.title, n, async () => { try { downloadUrl(pb.files.getURL(n, n.photo, {token: await fileToken(), download: 1}), n.photo); } catch(e){ toast(errText(e)); } });
+  try {
+    const res = await fetch(pb.files.getURL(n, n.photo, {token: await fileToken()}));
+    if(!res.ok) throw new Error('Фото не загрузилось.');
+    const url = URL.createObjectURL(await res.blob());
+    if(viewing === n){ body.classList.add('is-img'); body.innerHTML = `<img class="v-img" src="${esc(url)}" alt="${esc(n.title)}">`; }
+  } catch(e){ if(viewing === n) body.innerHTML = `<div class="v-msg">${esc(errText(e))}</div>`; }
+}
+function downloadUrl(url, name){
+  const a = document.createElement('a');
+  a.href = url; a.download = name || 'file'; a.rel = 'noopener';
+  document.body.appendChild(a); a.click(); a.remove();
+}
+async function downloadFile(f){ try { downloadUrl(await fileUrl(f, true), f.name); } catch(e){ toast(errText(e)); } }
+
+/* ---------- Диалог с формой ---------- */
+const dlg = $('#dlg'), form = $('#dlg-form');
+let cur = null;
+function fieldHTML(fd, v){
+  const id = 'fld-' + fd.key, val = v ?? '';
+  if(fd.type === 'photo'){
+    return `<div class="field"><span class="flabel">${esc(fd.label)}</span><div class="ph-pick"><span class="thumb" id="ph-thumb">${val ? `<img src="${esc(val)}" alt="">` : ICON.photo}</span>
+      <div class="acts"><label class="btn sm upload" for="${id}">${fd.removable ? 'Заменить' : 'Выбрать фото'}<input type="file" id="${id}" accept="image/*,.heic,.heif"></label>${fd.removable ? '<button type="button" class="btn sm ghost danger" id="ph-remove">Убрать</button>' : ''}</div></div>
+      <p class="hint" style="font-size:12.5px">JPG, PNG, WEBP или HEIC, до 10 МБ.</p></div>`;
+  }
+  let input;
+  if(fd.type === 'textarea') input = `<textarea id="${id}" rows="${fd.rows || 4}" maxlength="${fd.max || 10000}" placeholder="${esc(fd.placeholder || '')}">${esc(val)}</textarea>`;
+  else if(fd.type === 'select') input = `<select id="${id}">${(fd.options || []).map(([k, l]) => `<option value="${esc(k)}"${String(val) === String(k) ? ' selected' : ''}>${esc(l)}</option>`).join('')}</select>`;
+  else input = `<input type="${fd.type || 'text'}" id="${id}" value="${esc(val)}" maxlength="${fd.max || 300}" placeholder="${esc(fd.placeholder || '')}" autocomplete="off">`;
+  return `<div class="field"><label for="${id}">${esc(fd.label)}</label>${input}</div>`;
+}
+function openForm(o){
+  cur = {...o, saved: false, photoFile: null, photoRemove: false};
+  form.innerHTML = `<div class="dlg-head"><h2>${esc(o.title)}</h2><button type="button" class="icon-btn" data-close aria-label="Закрыть">×</button></div>
+    <div class="dlg-body">${o.text ? `<p class="dlg-text">${esc(o.text)}</p>` : ''}${(o.fields || []).map(fd => fieldHTML(fd, (o.values || {})[fd.key])).join('')}</div>
+    <p class="dlg-err" id="dlg-err" hidden></p>
+    <div class="dlg-foot">${o.onDelete ? `<button type="button" class="btn ghost danger" id="dlg-del">${esc(o.deleteLabel || 'Удалить')}</button>` : ''}${o.noCancel ? '' : '<button type="button" class="btn" data-close>Отмена</button>'}<button type="submit" class="btn ${o.danger ? 'danger-fill' : 'primary'}" id="dlg-ok">${esc(o.submit || 'Сохранить')}</button></div>`;
+  if(!dlg.open) dlg.showModal();
+  const first = form.querySelector('.dlg-body input[type=text], .dlg-body textarea');
+  if(first && window.matchMedia('(min-width: 700px)').matches) first.focus();
+}
+function formErr(msg){ const p = $('#dlg-err'); if(!p) return; p.textContent = msg; p.hidden = !msg; }
+function collect(){
+  const v = {};
+  for(const fd of cur.fields || []){
+    if(fd.type === 'photo') continue;
+    const el = form.querySelector('#fld-' + fd.key); v[fd.key] = el ? el.value.trim() : '';
+  }
+  return v;
+}
+form.addEventListener('submit', async e => {
+  e.preventDefault();
+  if(!cur) return;
+  const v = collect();
+  const miss = (cur.fields || []).find(fd => fd.required && !v[fd.key]);
+  if(miss){ formErr(`Заполните поле «${miss.label}».`); return; }
+  const ok = $('#dlg-ok'); ok.disabled = true; formErr('');
+  try { await cur.onSave(v, cur); cur.saved = true; dlg.close(); }
+  catch(err){ formErr(errText(err)); }
+  finally { ok.disabled = false; }
+});
+form.addEventListener('click', async e => {
+  if(e.target.closest('[data-close]')){ dlg.close(); return; }
+  if(e.target.closest('#ph-remove')){
+    cur.photoFile = null; cur.photoRemove = true;
+    $('#ph-thumb').innerHTML = ICON.photo; e.target.closest('#ph-remove').remove();
+    return;
+  }
+  const del = e.target.closest('#dlg-del');
+  if(del){
+    if(!arm(del, cur.confirmText || 'Нажмите ещё раз')) return;
+    del.disabled = true;
+    try { await cur.onDelete(); cur.saved = true; dlg.close(); }
+    catch(err){ formErr(errText(err)); del.disabled = false; }
+  }
+});
+form.addEventListener('change', e => {
+  const t = e.target;
+  if(t.id === 'fld-photo' && cur){
+    const f = t.files[0]; t.value = '';
+    if(!f) return;
+    cur.photoFile = f; cur.photoRemove = false;
+    const url = URL.createObjectURL(f);
+    $('#ph-thumb').innerHTML = `<img src="${esc(url)}" alt="">`;
+  }
+});
+dlg.addEventListener('close', () => { const c = cur; cur = null; c && c.onClose && c.onClose(c.saved); });
+function arm(btn, text){
+  if(btn.dataset.armed === '1') return true;
+  btn.dataset.armed = '1'; const old = btn.textContent; btn.textContent = text;
+  setTimeout(() => { if(btn.isConnected){ btn.dataset.armed = ''; btn.textContent = old; } }, 3500);
+  return false;
+}
+const FIELD_RU = {email:'почта', password:'пароль', passwordConfirm:'повтор пароля', oldPassword:'текущий пароль', name:'название', title:'название', text:'текст', file:'файл', photo:'фото', date:'дата', code:'код'};
+function errText(e){
+  if(!e) return 'Неизвестная ошибка.';
+  if(e.isAbort) return 'Запрос прерван.';
+  if(e.status === 0) return 'Нет связи с сервером. Проверьте интернет.';
+  const r = e.response || {};
+  const msg = r.message || e.message || '';
+  if(/[а-яё]/i.test(msg)) return msg;
+  const data = r.data || {};
+  const keys = Object.keys(data);
+  if(e.status === 400 && keys.length){
+    if(data.email && data.email.code === 'validation_not_unique') return 'Этот адрес почты уже зарегистрирован.';
+    if(data.password && /length/.test(data.password.code || '')) return 'Пароль должен быть не короче 8 символов.';
+    if(data.passwordConfirm) return 'Пароли не совпадают.';
+    if(data.oldPassword) return 'Текущий пароль введён неверно.';
+    if(data.photo) return 'Фото не принято: подходят JPG, PNG, WEBP и HEIC до 10 МБ.';
+    if(data.file) return 'Файл не принят: проверьте формат и размер (до 20 МБ).';
+    return 'Проверьте поля: ' + keys.map(k => FIELD_RU[k] || k).join(', ') + '.';
+  }
+  if(e.status === 401 || e.status === 403) return 'Нет доступа. Войдите заново.';
+  if(e.status === 404) return 'Запись не найдена: возможно, её уже удалили.';
+  if(e.status === 413) return 'Файл слишком большой.';
+  if(e.status === 429) return 'Слишком много запросов подряд. Подождите немного.';
+  return 'Не удалось выполнить действие. Попробуйте ещё раз.';
+}
+
+/* ---------- Формы ---------- */
+function openNeed(needId, sectionId){
+  const n = needId ? byId('needs', needId) : null;
+  openForm({title: n ? 'Изменить нужду' : 'Новая нужда',
+    fields: [
+      {key:'title', label:'Название', required:true, placeholder:'Например, здоровье мамы'},
+      {key:'description', label:'Описание', type:'textarea', rows:4, max:5000, placeholder:'О чём молиться (по желанию)'},
+      {key:'photo', label:'Фото (по желанию)', type:'photo', removable: !!(n && n.photo)}],
+    values: n ? {...n, photo: n.photo ? photoSrc(n, '120x120') : ''} : {},
+    submit: n ? 'Сохранить' : 'Добавить',
+    async onSave(v, c){
+      const data = {title: v.title, description: v.description};
+      if(c.photoFile) data.photo = await preparePhoto(c.photoFile);
+      else if(c.photoRemove) data.photo = null;
+      if(n) await col('needs').doc(n.id).update(data);
+      else await col('needs').doc().create({...data, section: sectionId, answered_at: '', answer_note: '', last_prayed_at: ''});
+      toast(n ? 'Сохранено' : 'Нужда добавлена');
+    }});
+}
+function sectionOptions(){
+  const out = [];
+  for(const s of topSections()){ out.push([s.id, s.name]); for(const c of childrenOf(s.id)) out.push([c.id, s.name + ' › ' + c.name]); }
+  return out;
+}
+function openMoveNeed(n){
+  openForm({title: 'Перенести в другой раздел', fields: [{key:'section', label:'Раздел', type:'select', options: sectionOptions()}], values: n, submit: 'Перенести',
+    async onSave(v){ if(v.section !== n.section){ await col('needs').doc(n.id).update({section: v.section}); toast('Нужда перенесена'); } }});
+}
+function confirmDeleteNeed(n){
+  const p = S.prayers.filter(x => x.need === n.id).length, f = S.files.filter(x => x.need === n.id).length;
+  openForm({title: 'Удалить нужду?', text: `«${n.title}» удалится вместе с записями молитв (${p}) и файлами (${f}). Вернуть их будет нельзя.`, submit: 'Удалить', danger: true,
+    async onSave(){
+      await col('needs').doc(n.id).delete();
+      S.prayers = S.prayers.filter(x => x.need !== n.id); S.files = S.files.filter(x => x.need !== n.id);
+      toast('Нужда удалена'); go('#/s/' + n.section, true);
+    }});
+}
+function openAnswered(n){
+  openForm({title: n.answered_at ? 'Отвечено' : 'Молитва отвечена',
+    fields: [{key:'answered_at', label:'Когда', type:'date', required:true}, {key:'answer_note', label:'Как Бог ответил', type:'textarea', rows:4, max:2000, placeholder:'Коротко, по желанию'}],
+    values: {answered_at: n.answered_at || todayISO(), answer_note: n.answer_note || ''},
+    onDelete: n.answered_at ? async () => { await col('needs').doc(n.id).update({answered_at: '', answer_note: ''}); toast('Пометка снята'); } : null,
+    deleteLabel: 'Снять пометку', confirmText: 'Точно снять?',
+    async onSave(v){ await col('needs').doc(n.id).update(v); toast('Отмечено: молитва отвечена'); }});
+}
+function openPrayer(prayerId, needId){
+  const p = prayerId ? byId('prayers', prayerId) : null;
+  openForm({title: p ? 'Запись молитвы' : 'Записать молитву',
+    fields: [{key:'text', label:'Молитва', type:'textarea', rows:6, required:true, placeholder:'Что вы сказали Богу об этой нужде'}, {key:'date', label:'Дата', type:'date', required:true}],
+    values: p || {date: todayISO()},
+    onDelete: p ? async () => { await col('prayers').doc(p.id).delete(); toast('Запись удалена'); } : null,
+    confirmText: 'Точно удалить?',
+    async onSave(v){
+      if(p){ await col('prayers').doc(p.id).update(v); toast('Сохранено'); return; }
+      await col('prayers').doc().create({...v, need: needId});
+      // запись молитвы тоже считается молитвой: обновляем «последнюю молитву», а за сегодня ставим отметку дня
+      const n = byId('needs', needId);
+      if(n && v.date > (n.last_prayed_at || '') && v.date <= todayISO()) await col('needs').doc(n.id).update({last_prayed_at: v.date}).catch(() => {});
+      if(v.date === todayISO()) await markDay().catch(() => {});
+      toast('Молитва записана');
+    }});
+}
+function openVerse(id){
+  const v = id ? byId('verses', id) : null;
+  if(!v && S.verses.length >= MAX_VERSES){ toast(`Можно вписать не больше ${MAX_VERSES} стихов.`); return; }
+  openForm({title: v ? 'Изменить стих' : 'Новый стих',
+    fields: [{key:'text', label:'Текст стиха', type:'textarea', rows:5, required:true, max:2000}, {key:'ref', label:'Место в Библии', placeholder:'Например, Филиппийцам 4:6', max:200}],
+    values: v || {},
+    onDelete: v ? async () => { await col('verses').doc(v.id).delete(); toast('Стих удалён'); } : null,
+    confirmText: 'Точно удалить?',
+    async onSave(x){
+      if(v) await col('verses').doc(v.id).update(x);
+      else await col('verses').doc().create({...x, sort: nextSort(S.verses)});
+      toast('Стих сохранён');
+    }});
+}
+function openName(){
+  openForm({title: 'Имя', fields: [{key:'name', label:'Как вас называть', max:100}], values: me(),
+    async onSave(v){ const rec = await pb.collection('users').update(me().id, {name: v.name}); pb.authStore.save(pb.authStore.token, rec); render(); toast('Имя сохранено'); }});
+}
+function info(title, text){ openForm({title, text, submit: 'Понятно', noCancel: true, async onSave(){}}); }
+
+/* ---------- Отметка дня ---------- */
+async function markDay(){
+  const t = todayISO();
+  if(dayRec(t)) return;
+  try { const rec = await pb.collection('prayer_days').create({id: newId(), user: me().id, date: t}); upsert('days', rec); }
+  catch(e){ await loadAll(['days']).catch(() => {}); if(!dayRec(t)) throw e; } // отметку уже поставили с другого устройства
+}
+async function toggleToday(btn){
+  btn.disabled = true;
+  try {
+    const rec = dayRec(todayISO());
+    if(rec){ await pb.collection('prayer_days').delete(rec.id); removeLocal('days', rec.id); toast('Отметка снята'); }
+    else { await markDay(); toast('Отмечено'); }
+  } catch(e){ toast(errText(e)); }
+  finally { btn.disabled = false; }
+}
+
+/* ---------- Меню «⋯» ---------- */
+let menu = null;
+function closeMenu(){ if(menu){ menu.el.remove(); menu.btn.setAttribute('aria-expanded', 'false'); menu = null; } }
+function openMenu(btn, items){
+  closeMenu();
+  const el = document.createElement('div');
+  el.className = 'menu'; el.setAttribute('role', 'menu');
+  el.innerHTML = items.map((it, i) => `<button type="button" role="menuitem" data-i="${i}"${it.danger ? ' class="danger"' : ''}>${esc(it.label)}</button>`).join('');
+  document.body.appendChild(el);
+  const r = btn.getBoundingClientRect(), w = el.offsetWidth, h = el.offsetHeight;
+  el.style.top = Math.max(8, Math.min(r.bottom + 4, window.innerHeight - h - 8)) + 'px';
+  el.style.left = Math.max(8, Math.min(r.right - w, window.innerWidth - w - 8)) + 'px';
+  btn.setAttribute('aria-expanded', 'true');
+  menu = {el, btn, items};
+  el.querySelector('button').focus();
+}
+window.addEventListener('resize', closeMenu);
+document.addEventListener('keydown', e => {
+  if(!menu) return;
+  if(e.key === 'Escape'){ const b = menu.btn; closeMenu(); b.focus(); return; }
+  if(e.key === 'ArrowDown' || e.key === 'ArrowUp'){
+    const items = [...menu.el.querySelectorAll('button')], i = items.indexOf(document.activeElement);
+    items[(i + (e.key === 'ArrowDown' ? 1 : items.length - 1)) % items.length].focus();
+    e.preventDefault();
+  }
+});
+function sectionMenu(btn, s){
+  openMenu(btn, [
+    {label: 'Изменить: название, цвет, место', run: () => go('#/edit/' + s.id)},
+    {label: 'Удалить раздел', danger: true, run: () => {
+      const subs = childrenOf(s.id).length, needs = needsIn(s.id).length;
+      if(subs || needs){ info('Раздел не пустой', `Удалить можно только пустой раздел. Сейчас в нём ${[subs ? `${subs} ${plural(subs, SUBS)}` : '', needs ? `${needs} ${plural(needs, NEEDS)}` : ''].filter(Boolean).join(' и ')}. Сначала перенесите или удалите их.`); return; }
+      openForm({title: 'Удалить раздел?', text: `Раздел «${s.name}» пустой и удалится полностью.`, submit: 'Удалить', danger: true,
+        async onSave(){ await col('sections').doc(s.id).delete(); toast('Раздел удалён'); go(s.parent ? '#/s/' + s.parent : '#/', true); }});
+    }}
+  ]);
+}
+function needMenu(btn, n){
+  openMenu(btn, [
+    {label: 'Изменить', run: () => openNeed(n.id)},
+    {label: 'Перенести в другой раздел', run: () => openMoveNeed(n)},
+    {label: 'Удалить нужду', danger: true, run: () => confirmDeleteNeed(n)}
+  ]);
+}
+
+/* ---------- Перестановка камней и стихов ---------- */
+async function moveItem(key, id, dir){
+  const item = byId(key, id); if(!item) return;
+  const list = key === 'verses' ? sortedVerses() : S.sections.filter(s => (s.parent || '') === (item.parent || '')).sort(bySort);
+  const i = list.findIndex(x => x.id === id), j = i + dir;
+  if(j < 0 || j >= list.length) return;
+  [list[i], list[j]] = [list[j], list[i]];
+  const changed = [];
+  list.forEach((x, n) => { if((x.sort ?? 0) !== n){ x.sort = n; changed.push(x); } });
+  render();
+  try { for(const x of changed) upsert(key, await pb.collection(PBN[key]).update(x.id, {sort: x.sort})); }
+  catch(e){ toast(errText(e)); loadAll([key]).catch(() => {}); }
+}
+
+/* ---------- Нажатия ---------- */
+document.addEventListener('click', async e => {
+  if(menu){
+    const it = e.target.closest('.menu [data-i]');
+    const m = menu; closeMenu();
+    if(it){ m.items[+it.dataset.i].run(); return; }
+    if(e.target.closest('[data-act$="-menu"]') === m.btn) return;
+  }
+  const a = e.target.closest('#main [data-act]');
+  if(!a || !S.loaded) return;
+  const d = a.dataset;
+  const r = route();
+  switch(d.act){
+    case 'today': toggleToday(a); break;
+    case 'new-verse': openVerse(); break;
+    case 'edit-verse': openVerse(d.id); break;
+    case 'reorder': UI.reorder = UI.reorder === d.scope ? '' : d.scope; render(); break;
+    case 'move': moveItem(d.key, d.id, +d.dir); break;
+    case 'sec-menu': { const s = byId('sections', d.id); if(s) sectionMenu(a, s); break; }
+    case 'need-menu': { const n = byId('needs', d.id); if(n) needMenu(a, n); break; }
+    case 'new-need': openNeed(null, d.id); break;
+    case 'prayed': {
+      const n = byId('needs', d.id); if(!n) return;
+      if(n.last_prayed_at === todayISO()){ toast('Сегодня уже отмечено'); return; }
+      a.disabled = true;
+      try { await col('needs').doc(n.id).update({last_prayed_at: todayISO()}); await markDay(); toast('Отмечено: помолился'); }
+      catch(err){ toast(errText(err)); a.disabled = false; }
+      break;
+    }
+    case 'answered': { const n = byId('needs', d.id); if(n) openAnswered(n); break; }
+    case 'new-prayer': openPrayer(null, d.id); break;
+    case 'edit-prayer': openPrayer(d.id); break;
+    case 'view-photo': { const n = byId('needs', d.id); if(n) openPhoto(n); break; }
+    case 'view-file': { const f = byId('files', d.id); if(f) openFile(f); break; }
+    case 'dl-file': { const f = byId('files', d.id); if(f) downloadFile(f); break; }
+    case 'del-file': {
+      const f = byId('files', d.id); if(!f) return;
+      openForm({title: 'Удалить файл?', text: `«${f.name}» удалится без возможности вернуть.`, submit: 'Удалить', danger: true,
+        async onSave(){ await col('files').doc(f.id).delete(); toast('Файл удалён'); }});
+      break;
+    }
+    case 'pick-color': {
+      const f = UI.form; if(!f) return;
+      f.name = $('#f-name').value; f.color = d.color;
+      const c = COLORS[f.color];
+      $('#pv-stone').style.backgroundColor = c.c;
+      $('#pv').className = 'preview ink-' + c.ink;
+      $('#f-color-l').textContent = 'Цвет камня: ' + c.n;
+      document.querySelectorAll('.swatch').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.color === f.color)));
+      break;
+    }
+    case 'place': { const f = UI.form; if(!f) return; f.name = $('#f-name').value; f.place = d.place; render(true); break; }
+    case 'cancel-form': UI.form = null; goBack(r.name === 'edit' ? '#/s/' + r.id : (r.q.get('in') ? '#/s/' + r.q.get('in') : '#/')); break;
+    case 'save-section': saveSection(a); break;
+    case 'period': {
+      try { const rec = await pb.collection('users').update(me().id, {verse_period: d.period}); pb.authStore.save(pb.authStore.token, rec); render(); toast('Стих будет меняться: ' + PERIODS[d.period][0].toLowerCase()); }
+      catch(err){ toast(errText(err)); }
+      break;
+    }
+    case 'edit-name': openName(); break;
+    default: accountAction(a, d);
+  }
+});
+document.addEventListener('change', async e => {
+  const t = e.target;
+  if(t.name === 'p-theme'){ setTheme(t.value); return; }
+  if(t.name === 'f-parent' && UI.form){ UI.form.parent = t.value; return; }
+  if(t.id === 'np-input'){
+    const f = t.files[0]; t.value = '';
+    const n = byId('needs', route().id);
+    if(f && n) setNeedPhoto(n, f);
+    return;
+  }
+  if(t.id === 'nf-input'){
+    const list = [...t.files]; t.value = '';
+    const n = byId('needs', route().id); if(!n) return;
+    UI.filesOpen = true;
+    for(const file of list){
+      toast(`Загружаю «${file.name}»…`);
+      try { await uploadFile(file, n.id); toast('Файл прикреплён'); }
+      catch(err){ toast(errText(err)); }
+    }
+  }
+});
+document.addEventListener('input', e => {
+  if(e.target.id === 'f-name' && UI.form){ UI.form.name = e.target.value; $('#pv-name').textContent = e.target.value.trim() || 'Название'; }
+});
+document.addEventListener('toggle', e => { if(e.target.id === 'files-fold') UI.filesOpen = e.target.open; }, true);
+
+/* ---------- Вход и регистрация ---------- */
+let authMode = 'login', authInvite = '', isFirstRun = false;
+async function showAuth(mode, invite){
+  $('#app').hidden = true; $('#auth').hidden = false;
+  authMode = mode || 'login'; if(invite) authInvite = invite;
+  try { const r = await fetch('/api/molitva/setup'); if(r.ok) isFirstRun = !!(await r.json()).firstRun; } catch(e){}
+  if(isFirstRun) authMode = 'register';
+  renderAuth();
+}
+function renderAuth(msg, ok){
+  const b = $('#auth-body');
+  const note = msg ? `<p class="${ok ? 'form-ok' : 'form-err'}">${esc(msg)}</p>` : '';
+  if(authMode === 'register'){
+    $('#auth-sub').textContent = isFirstRun ? 'Создайте аккаунт владельца. Вы станете администратором и сможете приглашать других.' : 'Регистрация по приглашению.';
+    b.innerHTML = `<form class="stack" id="auth-form" data-mode="register" novalidate>
+      ${isFirstRun ? '' : `<label>Код приглашения<input type="text" id="a-invite" autocomplete="off" autocapitalize="characters" value="${esc(authInvite)}" required></label>`}
+      <label>Имя<input type="text" id="a-name" autocomplete="name"></label>
+      <label>Почта<input type="email" id="a-email" autocomplete="email" required></label>
+      <label>Пароль (не короче 8 символов)<input type="password" id="a-pass" autocomplete="new-password" minlength="8" required></label>
+      <label>Повторите пароль<input type="password" id="a-pass2" autocomplete="new-password" required></label>
+      <label class="check"><input type="checkbox" id="a-consent"><span>Согласен на обработку персональных данных по <a href="/privacy.html" target="_blank" rel="noopener">политике конфиденциальности</a></span></label>
+      ${note}<button class="btn primary big wide" type="submit">Создать аккаунт</button>
+      ${isFirstRun ? '' : `<div class="auth-links"><button type="button" class="linkbtn" data-auth="login">У меня уже есть аккаунт</button></div>`}
+    </form>`;
+  } else if(authMode === 'reset'){
+    $('#auth-sub').textContent = 'Пришлём ссылку для нового пароля на вашу почту.';
+    b.innerHTML = `<form class="stack" id="auth-form" data-mode="reset" novalidate>
+      <label>Почта<input type="email" id="a-email" autocomplete="email" required></label>
+      ${note}<button class="btn primary big wide" type="submit">Отправить ссылку</button>
+      <div class="auth-links"><button type="button" class="linkbtn" data-auth="login">Вернуться ко входу</button></div>
+    </form>`;
+  } else {
+    $('#auth-sub').textContent = 'Нужды, молитвы и дни молитвы в одном месте.';
+    b.innerHTML = `<form class="stack" id="auth-form" data-mode="login" novalidate>
+      <label>Почта<input type="email" id="a-email" autocomplete="email" required></label>
+      <label>Пароль<input type="password" id="a-pass" autocomplete="current-password" required></label>
+      ${note}<button class="btn primary big wide" type="submit">Войти</button>
+      <div class="auth-links"><button type="button" class="linkbtn" data-auth="register">Регистрация по приглашению</button><button type="button" class="linkbtn" data-auth="reset">Забыли пароль?</button></div>
+    </form>`;
+  }
+}
+$('#auth').addEventListener('click', e => { const b = e.target.closest('[data-auth]'); if(b){ authMode = b.dataset.auth; renderAuth(); } });
+$('#auth').addEventListener('submit', async e => {
+  e.preventDefault();
+  const f = e.target, btn = f.querySelector('[type=submit]');
+  const v = id => (f.querySelector('#' + id)?.value || '').trim();
+  btn.disabled = true;
+  try{
+    if(f.dataset.mode === 'login'){
+      if(!v('a-email') || !v('a-pass')) throw {msg:'Введите почту и пароль.'};
+      try { await pb.collection('users').authWithPassword(v('a-email'), f.querySelector('#a-pass').value); }
+      catch(err){ if(err.status === 400) throw {msg:'Неверная почта или пароль.'}; throw err; }
+      startApp();
+    } else if(f.dataset.mode === 'register'){
+      const pass = f.querySelector('#a-pass').value, pass2 = f.querySelector('#a-pass2').value;
+      if(!isFirstRun && !v('a-invite')) throw {msg:'Введите код приглашения.'};
+      if(!v('a-email')) throw {msg:'Введите почту.'};
+      if(pass.length < 8) throw {msg:'Пароль должен быть не короче 8 символов.'};
+      if(pass !== pass2) throw {msg:'Пароли не совпадают.'};
+      if(!f.querySelector('#a-consent').checked) throw {msg:'Нужно согласие на обработку персональных данных.'};
+      const body = {email: v('a-email'), password: pass, passwordConfirm: pass2, name: v('a-name'), theme: themePref()};
+      if(!isFirstRun) body.invite = v('a-invite');
+      await pb.collection('users').create(body);
+      await pb.collection('users').authWithPassword(body.email, pass);
+      isFirstRun = false;
+      startApp();
+    } else {
+      if(!v('a-email')) throw {msg:'Введите почту.'};
+      await pb.collection('users').requestPasswordReset(v('a-email'));
+      authMode = 'login'; renderAuth('Если такой адрес зарегистрирован, письмо со ссылкой уже отправлено. Проверьте и папку «Спам».', true); return;
+    }
+  }catch(err){
+    const fe = $('#auth-form');
+    if(fe){ let p = fe.querySelector('.form-err'); if(!p){ p = document.createElement('p'); p.className = 'form-err'; fe.querySelector('[type=submit]').before(p); } p.textContent = err.msg || errText(err); }
+  }finally{ btn.disabled = false; }
+});
+
+/* ---------- Профиль: пароль, приглашения, выход ---------- */
+const INV_ABC = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+function inviteCode(){ const a = new Uint8Array(8); crypto.getRandomValues(a); return Array.from(a, x => INV_ABC[x % INV_ABC.length]).join(''); }
+async function copyText(text){
+  try { await navigator.clipboard.writeText(text); toast('Ссылка скопирована'); }
+  catch(e){ window.prompt && window.prompt('Скопируйте:', text); }
+}
+async function accountAction(a, d){
+  try{
+    switch(d.act){
+      case 'save-pass': {
+        const old = $('#p-old').value, n1 = $('#p-new').value, n2 = $('#p-new2').value;
+        if(n1.length < 8){ toast('Новый пароль должен быть не короче 8 символов.'); return; }
+        if(n1 !== n2){ toast('Новые пароли не совпадают.'); return; }
+        const email = me().email;
+        await pb.collection('users').update(me().id, {oldPassword: old, password: n1, passwordConfirm: n2});
+        await pb.collection('users').authWithPassword(email, n1);
+        toast('Пароль изменён'); render(); break;
+      }
+      case 'new-invite': {
+        const body = {code: inviteCode(), note: $('#i-note').value.trim(), max_uses: Number($('#i-max').value), uses: 0, expires: $('#i-exp').value};
+        const rec = await pb.collection('invites').create(body);
+        S.invites.push(rec); render();
+        copyText(`${location.origin}/?invite=${rec.code}`);
+        break;
+      }
+      case 'copy-invite': copyText(`${location.origin}/?invite=${d.code}`); break;
+      case 'del-invite': {
+        if(!arm(a, 'Точно?')) return;
+        await pb.collection('invites').delete(d.id);
+        S.invites = S.invites.filter(i => i.id !== d.id); render(); break;
+      }
+      case 'logout': pb.authStore.clear(); location.hash = ''; location.reload(); break;
+      case 'delete-account': {
+        if(!arm(a, 'Всё будет удалено. Нажмите ещё раз')) return;
+        await pb.collection('users').delete(me().id);
+        pb.authStore.clear(); location.hash = ''; location.reload(); break;
+      }
+    }
+  }catch(e){ toast(errText(e)); }
+}
+
+let tt = 0;
+function toast(msg){ const el = $('#toast'); const host = viewer.open ? viewer : dlg.open ? dlg : document.body; if(el.parentNode !== host) host.appendChild(el); el.textContent = msg; el.classList.add('show'); clearTimeout(tt); tt = setTimeout(() => el.classList.remove('show'), 2800); }
+
+boot();
+})();

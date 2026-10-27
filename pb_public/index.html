@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Молитвенный дневник</title>
+<meta name="description" content="Молитвенные нужды, записи молитв и отметки дней">
+<meta name="theme-color" content="#F2F0EB" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#171815" media="(prefers-color-scheme: dark)">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Дневник">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" href="/icons/favicon-64.png" type="image/png">
+<link rel="apple-touch-icon" href="/icons/apple-touch-icon.png">
+<link rel="preload" href="/img/stone.webp" as="image" type="image/webp">
+<link rel="stylesheet" href="/app.css?v=1">
+<script>try{var t=JSON.parse(localStorage.getItem('mol_theme')||'""');if(t==='light'||t==='dark')document.documentElement.setAttribute('data-theme',t);}catch(e){}</script>
+</head>
+<body>
+
+<section class="auth" id="auth" hidden>
+  <div class="auth-card">
+    <div class="auth-brand"><h1>Молитвенный дневник</h1><p id="auth-sub">Нужды, молитвы и дни молитвы в одном месте.</p></div>
+    <div id="auth-body"></div>
+  </div>
+</section>
+
+<div id="app" hidden>
+<div class="update-bar" id="update-bar" hidden><div><span>Вышло обновление приложения.</span><button type="button" class="btn sm primary" id="update-btn">Обновить</button><button type="button" class="icon-btn" id="update-close" aria-label="Скрыть">×</button></div></div>
+<div class="notice" id="notice" hidden><div id="notice-text"></div></div>
+<main id="main"><div class="loading">Загружаю…</div></main>
+<nav class="tabbar" id="tabbar" aria-label="Разделы приложения">
+  <div class="tabbar-in">
+    <a href="#/" class="tab" data-tab="diary"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5.5C4 4.7 4.7 4 5.5 4H11v16H5.5C4.7 20 4 19.3 4 18.5z M20 5.5C20 4.7 19.3 4 18.5 4H13v16h5.5c.8 0 1.5-.7 1.5-1.5z"/></svg><span>Дневник</span></a>
+    <a href="#/profile" class="tab" data-tab="profile"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="4"/><path d="M4 20c0-3.6 3.6-6 8-6s8 2.4 8 6"/></svg><span>Профиль</span></a>
+  </div>
+</nav>
+</div>
+
+<dialog id="dlg"><form id="dlg-form" novalidate></form></dialog>
+<dialog id="viewer" aria-label="Просмотр"><div class="v-head"><h2 id="v-title"></h2><button type="button" class="btn sm" id="v-dl">Скачать</button><button type="button" class="icon-btn" id="v-close" aria-label="Закрыть">×</button></div><div class="v-body" id="v-body"></div></dialog>
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+<script src="/vendor/pocketbase.umd.js"></script>
+<script src="/app.js?v=1"></script>
+</body>
+</html>
