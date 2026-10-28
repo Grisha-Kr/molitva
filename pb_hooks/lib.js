@@ -116,4 +116,94 @@ function checkSection(e) {
 
 const FILE_EXT = ["pdf", "doc", "docx", "jpg", "jpeg", "png", "gif", "webp", "heic", "heif"];
 
-module.exports = { MB, quotaBytes, usedBytes, checkQuota, checkSectionDepth, checkSection, recordPhoto, checkDayDate, addDefaultVerse, FILE_EXT };
+/* ---------- Группы ---------- */
+const MAX_MEMBERS = 20; // участников в группе
+const MAX_GROUPS = 10;  // групп у одного человека
+
+// Код ссылки-приглашения в группу: 24 случайных символа без похожих (0/o, 1/l)
+function newGroupCode() {
+  return $security.randomStringWithAlphabet(24, "abcdefghijkmnpqrstuvwxyz23456789");
+}
+
+function isMember(app, groupId, userId) {
+  return app.countRecords("group_members", $dbx.hashExp({ group: groupId, user: userId })) > 0;
+}
+
+// Группа, в которой пользователь участник; иначе ошибка «не найдена» (чужие группы не выдаём)
+function memberGroup(app, groupId, userId) {
+  let g = null;
+  try { g = app.findRecordById("groups", groupId); } catch (_) {}
+  if (!g || !isMember(app, g.id, userId)) throw new NotFoundError("Группа не найдена: возможно, её удалили или вас из неё исключили.");
+  return g;
+}
+
+function ownGroup(app, groupId, userId) {
+  const g = memberGroup(app, groupId, userId);
+  if (g.getString("owner") !== userId) throw new ForbiddenError("Это может сделать только создатель группы.");
+  return g;
+}
+
+// Группа по коду из ссылки-приглашения
+function groupByCode(app, code) {
+  code = String(code || "").trim().toLowerCase();
+  let g = null;
+  if (code.length >= 16) {
+    try { g = app.findFirstRecordByData("groups", "invite_code", code); } catch (_) {}
+  }
+  if (!g) throw new NotFoundError("Ссылка не работает: возможно, создатель группы сделал новую. Попросите прислать свежую ссылку.");
+  return g;
+}
+
+function checkGroupLimit(app, userId) {
+  if (app.countRecords("group_members", $dbx.hashExp({ user: userId })) >= MAX_GROUPS) {
+    throw new BadRequestError(`Можно состоять не больше чем в ${MAX_GROUPS} группах. Чтобы вступить в новую, выйдите из одной из старых.`);
+  }
+}
+
+function addMember(app, groupId, userId) {
+  const m = new Record(app.findCollectionByNameOrId("group_members"));
+  m.set("group", groupId);
+  m.set("user", userId);
+  app.save(m);
+}
+
+// Человек выходит или его исключают: его нужды пропадают из группы, его «Молюсь» в группе удаляются.
+// В его личном дневнике всё остаётся.
+function removeMember(app, groupId, userId) {
+  for (const r of app.findAllRecords("group_needs", $dbx.hashExp({ group: groupId, added_by: userId }))) app.delete(r);
+  for (const r of app.findAllRecords("group_praying", $dbx.hashExp({ group: groupId, user: userId }))) app.delete(r);
+  for (const r of app.findAllRecords("group_members", $dbx.hashExp({ group: groupId, user: userId }))) app.delete(r);
+}
+
+// Аккаунт создателя удаляется: группа переходит к участнику, который вступил раньше всех, а если никого нет, удаляется
+function handOverGroups(app, userId) {
+  for (const g of app.findAllRecords("groups", $dbx.hashExp({ owner: userId }))) {
+    const rest = app.findRecordsByFilter("group_members", "group = {:g} && user != {:u}", "created", 1, 0, { g: g.id, u: userId });
+    if (rest.length) {
+      g.set("owner", rest[0].getString("user"));
+      app.save(g);
+    } else {
+      app.delete(g);
+    }
+  }
+}
+
+// Фильтры и сортировка в запросах к общим коллекциям: только безопасные поля.
+// Так через фильтр нельзя подобрать скрытое содержимое (заметку об ответе, почту, раздел, код ссылки).
+const QUERY_FIELDS = ["id", "owner", "user", "group", "need", "group_need", "added_by", "created", "updated", "name", "title", "true", "false", "null", "@request.auth.id", "@random"];
+function checkQuery(e) {
+  if (e.hasSuperuserAuth()) return;
+  const q = e.requestInfo().query || {};
+  for (const p of ["filter", "sort"]) {
+    const s = String(q[p] || "").replace(/'(?:[^'\\]|\\.)*'|"(?:[^"\\]|\\.)*"/g, "");
+    const words = s.match(/[@A-Za-z_][\w.:@]*/g) || [];
+    for (const w of words) {
+      if (QUERY_FIELDS.indexOf(w) < 0) throw new BadRequestError("Такой запрос не поддерживается.");
+    }
+  }
+}
+
+module.exports = {
+  MB, quotaBytes, usedBytes, checkQuota, checkSectionDepth, checkSection, recordPhoto, checkDayDate, addDefaultVerse, FILE_EXT,
+  MAX_MEMBERS, MAX_GROUPS, newGroupCode, groupByCode, isMember, memberGroup, ownGroup, checkGroupLimit, addMember, removeMember, handOverGroups, checkQuery,
+};

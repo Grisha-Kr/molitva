@@ -1,7 +1,7 @@
 // Сервис-воркер: хранит оболочку приложения, чтобы оно быстро открывалось.
 // Данные (/api/) никогда не кэшируются.
-const VERSION = 'molitva-v2';
-const SHELL = ['/', '/index.html', '/app.css?v=2', '/app.js?v=2', '/vendor/pocketbase.umd.js', '/manifest.webmanifest', '/icons/icon-192.png?v=2', '/img/stone.webp', '/img/water.webp', '/img/wave-mask.svg'];
+const VERSION = 'molitva-v3';
+const SHELL = ['/', '/index.html', '/app.css?v=3', '/app.js?v=3', '/vendor/pocketbase.umd.js', '/manifest.webmanifest', '/icons/icon-192.png?v=2', '/img/stone.webp', '/img/water.webp', '/img/wave-mask.svg'];
 
 self.addEventListener('install', e => {
   e.waitUntil(caches.open(VERSION).then(c => c.addAll(SHELL)).then(() => self.skipWaiting()));

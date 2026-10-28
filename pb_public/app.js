@@ -17,8 +17,12 @@ const MAX_VERSES = 7;
 const MB = 1024*1024;
 const MAX_PHOTO = 10*MB, MAX_FILE = 20*MB;
 const FILE_EXT = ['pdf','doc','docx','jpg','jpeg','png','gif','webp','heic','heif'];
-const PBN = {sections:'sections', needs:'needs', files:'need_files', prayers:'prayers', verses:'verses', days:'prayer_days', daily:'daily_verses'};
+const PBN = {sections:'sections', needs:'needs', files:'need_files', prayers:'prayers', verses:'verses', days:'prayer_days', daily:'daily_verses',
+  groups:'groups', gmembers:'group_members', glinks:'group_needs', gpray:'group_praying', people:'users', shared:'needs'};
 const KEYS = Object.keys(PBN);
+// Группы: needs = свои нужды, shared = чужие нужды из общих групп (только чтение), people = участники общих групп
+const GKEYS = ['groups','gmembers','glinks','gpray','people','shared'];
+const MAX_MEMBERS = 20, MAX_GROUPS = 10;
 
 /* ---------- Значки ---------- */
 const ICON = {
@@ -39,14 +43,16 @@ const ICON = {
   left: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 6l-6 6 6 6"/></svg>',
   right: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg>',
   dl: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v11M7 10l5 5 5-5M5 20h14"/></svg>',
-  trash: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/></svg>'
+  trash: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/></svg>',
+  group: '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="9" cy="8" r="3"/><path d="M3 19c0-3 2.7-5 6-5s6 2 6 5"/><circle cx="17" cy="9" r="2.5"/><path d="M16 14c2.8 0 5 1.7 5 4.5"/></svg>'
 };
 
 /* ---------- Состояние ---------- */
-const S = {sections:[], needs:[], files:[], prayers:[], verses:[], days:[], daily:[], invites:[], usage:null, loaded:false};
+const S = {sections:[], needs:[], files:[], prayers:[], verses:[], days:[], daily:[], invites:[], usage:null, loaded:false,
+  groups:[], gmembers:[], glinks:[], gpray:[], people:[], shared:[], gdays:{}};
 const loadLS = (k, d) => { try { const v = localStorage.getItem('mol_'+k); return v == null ? d : JSON.parse(v); } catch(e){ return d; } };
 const saveLS = (k, v) => { try { localStorage.setItem('mol_'+k, JSON.stringify(v)); } catch(e){} };
-const UI = {reorder:'', filesOpen:false, form:null, hops:0, verseDay:undefined, verseAt:0};
+const UI = {reorder:'', filesOpen:false, form:null, hops:0, verseDay:undefined, verseAt:0, join:null};
 const pb = new PocketBase(location.origin);
 pb.autoCancellation(false);
 const me = () => pb.authStore.record || {};
@@ -84,6 +90,7 @@ const WDM = ['Пн','Вт','Ср','Чт','Пт','Сб','Вс']; // неделя 
 const WDF = ['Воскресенье','Понедельник','Вторник','Среда','Четверг','Пятница','Суббота'];
 const monIndex = d => (d.getDay() + 6) % 7; // 0 = понедельник
 const canMark = iso => { const k = diff(iso); return k >= 0 && k <= 2; }; // сегодня, вчера, позавчера
+const weekStart = () => addDays(todayISO(), -monIndex(new Date())); // понедельник текущей недели
 function fmtDay(iso){
   if(!iso) return '';
   const [y,m,d] = iso.split('-').map(Number);
@@ -139,25 +146,48 @@ function col(key){
     };
   } };
 }
+// Свои нужды и чужие (из общих групп) лежат в одной коллекции: разделяем по владельцу
+const LIST_FILTER = {needs: () => pb.filter('owner = {:me}', {me: me().id}), shared: () => pb.filter('owner != {:me}', {me: me().id})};
 async function loadAll(keys = KEYS){
-  const res = await Promise.all(keys.map(k => pb.collection(PBN[k]).getFullList({batch: 500})));
+  const res = await Promise.all(keys.map(k => pb.collection(PBN[k]).getFullList({batch: 500, ...(LIST_FILTER[k] ? {filter: LIST_FILTER[k]()} : {})})));
   keys.forEach((k, n) => { S[k] = res[n]; });
   schedule();
+  if(keys.includes('gmembers')) loadGroupDays(true);
+}
+// Изменилось что-то в группах: доступ к чужим нуждам и участникам мог появиться или пропасть, перечитываем всё групповое
+let gTimer = 0;
+function refreshGroups(){ clearTimeout(gTimer); gTimer = setTimeout(() => loadAll(GKEYS).catch(() => {}), 300); }
+// Неделя группы: отметки дня участников общих групп за текущую неделю (сервер отдаёт только её)
+let gdaysAt = 0;
+async function loadGroupDays(force){
+  if(!force && Date.now() - gdaysAt < 60e3) return;
+  gdaysAt = Date.now();
+  if(!S.groups.length){ S.gdays = {}; return; }
+  try { S.gdays = (await pb.send('/api/molitva/group-days', {query: {from: weekStart()}})).days || {}; schedule(); } catch(e){}
 }
 let subscribed = false;
 async function subscribeAll(){
   if(subscribed) return; subscribed = true;
   await pb.collection('users').subscribe(me().id, e => { if(e.action === 'update'){ pb.authStore.save(pb.authStore.token, e.record); themeFromUser(); schedule(); } });
   for(const k of KEYS){
-    await pb.collection(PBN[k]).subscribe('*', e => { if(e.action === 'delete') removeLocal(k, e.record.id); else upsert(k, e.record); });
+    if(k === 'people' || k === 'shared') continue;
+    await pb.collection(PBN[k]).subscribe('*', e => {
+      // нужды: свои в needs, чужие из общих групп в shared
+      const key = k === 'needs' && e.record.owner !== me().id ? 'shared' : k;
+      if(e.action === 'delete') removeLocal(key, e.record.id); else upsert(key, e.record);
+      if(k === 'groups' || k === 'gmembers' || k === 'glinks') refreshGroups();
+    });
   }
 }
 
 /* ---------- Запуск ---------- */
 async function boot(){
   if('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {});
-  const invite = new URLSearchParams(location.search).get('invite');
-  if(invite) history.replaceState(null, '', location.pathname + location.hash);
+  const qs = new URLSearchParams(location.search);
+  const invite = qs.get('invite'), join = qs.get('group');
+  // ссылка в группу: код запоминаем, после входа приложение предложит вступить
+  if(join) saveLS('join', join.trim());
+  if(invite || join) history.replaceState(null, '', location.pathname + location.hash);
   if(!pb.authStore.isValid){ showAuth(invite ? 'register' : 'login', invite); return; }
   try { await pb.collection('users').authRefresh(); }
   catch(e){ if(e && e.status && e.status !== 0){ pb.authStore.clear(); showAuth('login'); return; } }
@@ -171,6 +201,8 @@ async function startApp(){
     await loadAll();
     S.loaded = true; $('#notice').hidden = true; render(true);
     if(route().name === 'profile') loadProfileExtras();
+    const join = loadLS('join', '');
+    if(join){ saveLS('join', ''); go('#/join/' + encodeURIComponent(join)); }
     subscribeAll().catch(() => {});
   } catch(e){
     showNotice('Не удалось загрузить данные. ' + errText(e));
@@ -206,7 +238,8 @@ let raf = 0;
 function schedule(){ if(raf) return; raf = requestAnimationFrame(() => { raf = 0; render(); }); }
 function showNotice(text){ $('#notice-text').textContent = text; $('#notice').hidden = false; }
 
-/* ---------- Адреса экранов: #/, #/s/ID, #/n/ID, #/new, #/edit/ID, #/verses, #/answers, #/profile ---------- */
+/* ---------- Адреса экранов: #/, #/s/ID, #/n/ID, #/new, #/edit/ID, #/verses, #/answers, #/profile,
+   группы: #/groups, #/g/ID, #/gn/ID (общая нужда, ID записи group_needs), #/join/КОД ---------- */
 function route(){
   const h = location.hash.replace(/^#\/?/, '');
   const [path, q] = h.split('?');
@@ -221,7 +254,7 @@ window.addEventListener('hashchange', () => { UI.hops++; UI.reorder = ''; UI.fil
 /* ---------- Отрисовка ---------- */
 function render(force){
   const r = route();
-  const tab = ['profile','verses','answers'].includes(r.name) ? 'profile' : 'diary';
+  const tab = ['profile','verses','answers'].includes(r.name) ? 'profile' : ['groups','g','gn','join'].includes(r.name) || (r.name === 'n' && r.q.get('g')) ? 'groups' : 'diary';
   document.querySelectorAll('.tab').forEach(t => t.setAttribute('aria-current', t.dataset.tab === tab ? 'page' : 'false'));
   const m = $('#main');
   if(calDlg.open) renderCal();
@@ -230,7 +263,8 @@ function render(force){
   // форма раздела не перерисовывается от живых обновлений, чтобы не сбить ввод
   if(isForm && !force && $('#f-name')) return;
   if(!isForm) UI.form = null;
-  const views = {home:vHome, s:vSection, n:vNeed, new:vSectionForm, edit:vSectionForm, verses:vVerses, answers:vAnswers, profile:vProfile};
+  const views = {home:vHome, s:vSection, n:vNeed, new:vSectionForm, edit:vSectionForm, verses:vVerses, answers:vAnswers, profile:vProfile,
+    groups:vGroups, g:vGroup, gn:vGroupNeed, join:vJoin};
   m.innerHTML = (views[r.name] || vHome)(r);
 }
 const notFound = () => `<div class="card"><p>Запись не найдена: возможно, её уже удалили.</p><a class="btn" href="#/">На главную</a></div>`;
@@ -370,7 +404,9 @@ function vNeed(r){
   const prayers = S.prayers.filter(p => p.need === n.id).sort((a, b) => String(b.date).localeCompare(String(a.date)) || String(b.created).localeCompare(String(a.created)));
   const files = S.files.filter(f => f.need === n.id).sort((a, b) => String(b.created).localeCompare(String(a.created)));
   const meta = ['С ' + fmtDay(createdISO(n)), n.answered_at ? '' : prayedText(n.last_prayed_at).toLowerCase()].filter(Boolean).join(' · ');
-  return `<div class="nav-head">${backLink('#/s/' + esc(n.section), pathOf(sec).join(' › ') || 'Раздел')}
+  // открыли из группы: «Назад» ведёт в группу
+  const fromG = r.q.get('g') ? byId('groups', r.q.get('g')) : null;
+  return `<div class="nav-head">${fromG ? backLink('#/g/' + esc(fromG.id), fromG.name) : backLink('#/s/' + esc(n.section), pathOf(sec).join(' › ') || 'Раздел')}
       <button type="button" class="icon-btn" data-act="need-menu" data-id="${esc(n.id)}" aria-label="Действия с нуждой: изменить, перенести, удалить" aria-haspopup="menu">${ICON.more}</button></div>
     ${photo}
     <div class="need-head${n.photo ? ' center' : ''}"><h1>${esc(n.title)}</h1><span>${esc(meta)}</span></div>
@@ -380,6 +416,7 @@ function vNeed(r){
       <button type="button" class="btn ${n.answered_at ? 'soft' : 'outline'}" data-act="answered" data-id="${esc(n.id)}">${n.answered_at ? ICON.check : ''}Отвечено</button>
     </div>
     ${n.answered_at ? `<div class="answer"><b>Отвечено ${fmtDay(n.answered_at)}</b>${n.answer_note ? `<p>${esc(n.answer_note)}</p>` : ''}</div>` : ''}
+    ${needShareHTML(n)}
     <h2 class="label">Мои молитвы <span class="side">${ICON.lock}видно только вам</span></h2>
     ${prayers.length ? `<div class="entries">${prayers.map(p => `<button type="button" class="entry" data-act="edit-prayer" data-id="${esc(p.id)}"><small>${fmtDay(p.date)}</small><span>${esc(p.text)}</span></button>`).join('')}</div>` : ''}
     <button type="button" class="dashed" data-act="new-prayer" data-id="${esc(n.id)}">+ Записать молитву</button>
@@ -494,6 +531,293 @@ function vAnswers(){
       : '<p class="hint">Когда вы отметите нужду кнопкой «Отвечено», она появится здесь.</p>'}`;
 }
 
+/* ---------- Группы ---------- */
+const byCreated = (a, b) => String(a.created).localeCompare(String(b.created));
+const sortedGroups = () => [...S.groups].sort((a, b) => String(a.name).localeCompare(String(b.name), 'ru') || byCreated(a, b));
+const membersOf = gid => S.gmembers.filter(m => m.group === gid).sort(byCreated);
+const person = uid => uid === me().id ? me() : byId('people', uid) || {id: uid, name: ''};
+const nameOf = u => (u && u.name) || 'Без имени';
+const linksOf = gid => S.glinks.filter(l => l.group === gid);
+const linksOfNeed = nid => S.glinks.filter(l => l.need === nid);
+const linkNeed = l => l ? byId('needs', l.need) || byId('shared', l.need) : null;
+const prayingOf = lid => S.gpray.filter(p => p.group_need === lid).sort(byCreated);
+const isOwner = g => !!g && g.owner === me().id;
+const MEMBERS = ['участник','участника','участников'];
+const prayCount = n => `${n % 10 === 1 && n % 100 !== 11 ? 'молится' : 'молятся'} ${n}`;
+const groupLink = g => `${location.origin}/?group=${g.invite_code || ''}`;
+// Отметки дня участника: свои берём из дневника, чужие с сервера (только текущая неделя)
+const marksOf = uid => uid === me().id ? S.days.map(d => d.date) : S.gdays[uid] || [];
+const prayedToday = gid => { const t = todayISO(); return membersOf(gid).filter(m => marksOf(m.user).includes(t)).length; };
+const faceHTML = (u, cls) => `<span class="face${cls ? ' ' + cls : ''}" aria-hidden="true">${avatarInner(u)}</span>`;
+const groupGone = () => `<div class="nav-head">${backLink('#/groups', 'Группы')}</div>
+  <div class="card"><p>Группа не найдена: возможно, её удалили или вас из неё исключили.</p><a class="btn" href="#/groups">К группам</a></div>`;
+
+function vGroups(){
+  const list = sortedGroups();
+  const cards = list.map(g => {
+    const ms = membersOf(g.id), k = linksOf(g.id).length;
+    const faces = ms.slice(0, 7).map(m => faceHTML(person(m.user))).join('') + (ms.length > 7 ? `<span class="face more" aria-hidden="true">+${ms.length - 7}</span>` : '');
+    return `<a class="group-card" href="#/g/${esc(g.id)}"><span class="gc-top"><b>${esc(g.name)}</b>${ICON.chev}</span>
+      <span class="faces">${faces}</span>
+      <span class="gc-meta">Сегодня молились ${prayedToday(g.id)} из ${ms.length} · ${k} ${plural(k, NEEDS)}</span></a>`;
+  }).join('');
+  const full = list.length >= MAX_GROUPS;
+  return `<header class="head"><h1>Группы</h1></header>
+    ${list.length ? `<div class="groups">${cards}</div>`
+      : '<section class="card"><p class="empty">Группа нужна, чтобы молиться вместе: делиться нуждами и видеть, кто сегодня молился. Чтобы молиться вдвоём, создайте группу и отправьте ссылку близкому человеку.</p></section>'}
+    <button type="button" class="${list.length ? 'dashed' : 'btn primary big wide'}" data-act="new-group"${full ? ' disabled' : ''}>${full ? `Вы уже в ${MAX_GROUPS} группах` : list.length ? '+ Создать группу' : 'Создать группу'}</button>`;
+}
+
+// Общая нужда в списке группы: фото, название, кто добавил и когда, «Молюсь» и счётчик
+function gneedRow(l, n){
+  const src = n.photo ? roundSrc(n) : '';
+  const pic = src ? imgTag(src) : n.photo ? '' : n.answered_at ? ICON.check : ICON.hands;
+  const pr = prayingOf(l.id), mine = pr.some(p => p.user === me().id);
+  const who = l.added_by === me().id ? 'Вы' : nameOf(person(l.added_by));
+  const href = n.owner === me().id ? `#/n/${esc(n.id)}?g=${esc(l.group)}` : `#/gn/${esc(l.id)}`;
+  return `<div class="gneed${n.answered_at ? ' answered' : ''}">
+    <a class="gn-main" href="${href}"><span class="pic${n.answered_at && !n.photo ? ' ok' : ''}" aria-hidden="true">${pic}</span>
+      <span class="txt"><b>${esc(n.title)}</b><span class="when">${esc(who)} · ${fmtDay(createdISO(l))}</span>${n.answered_at ? `<span class="pill">Отвечено ${fmtDay(n.answered_at)}</span>` : ''}</span></a>
+    <button type="button" class="molus" data-act="g-pray" data-id="${esc(l.id)}" aria-pressed="${mine}">${mine ? ICON.check : ''}<span>Молюсь</span></button>
+    ${pr.length ? `<button type="button" class="gn-count" data-act="g-who" data-id="${esc(l.id)}">${prayCount(pr.length)}</button>` : ''}</div>`;
+}
+
+function vGroup(r){
+  const g = byId('groups', r.id);
+  if(!g) return groupGone();
+  const ms = membersOf(g.id), own = isOwner(g);
+  // неделя группы: строка на участника, семь кружков с понедельника, сегодняшний столбец выделен
+  const wi = monIndex(new Date()), dates = WDM.map((_, k) => addDays(weekStart(), k));
+  const head = `<span></span>${WDM.map((l, k) => `<span class="gw-l${k === wi ? ' today' : ''}" aria-hidden="true">${l}</span>`).join('')}`;
+  const rows = ms.map(m => {
+    const u = person(m.user), marks = marksOf(m.user), mine = m.user === me().id;
+    const cnt = dates.filter(d => marks.includes(d)).length;
+    return `<span class="gw-who">${faceHTML(u, 'sm')}<span class="nm${mine ? ' self' : ''}">${esc(nameOf(u))}${mine ? ' (вы)' : ''}</span>
+        <span class="sr">: на этой неделе ${cnt} из 7 дней, сегодня ${marks.includes(dates[wi]) ? 'отмечено' : 'не отмечено'}</span></span>` +
+      dates.map((iso, k) => `<i class="gw-d${marks.includes(iso) ? ' on' : ''}${k === wi ? ' today' : ''}${k > wi ? ' future' : ''}" aria-hidden="true"></i>`).join('');
+  }).join('');
+  // общие нужды: новые сверху, отвеченные внизу
+  const links = linksOf(g.id).map(l => ({l, n: linkNeed(l)})).filter(x => x.n)
+    .sort((a, b) => (!!a.n.answered_at - !!b.n.answered_at) || String(b.l.created).localeCompare(String(a.l.created)));
+  const alone = own && ms.length < 2
+    ? `<section class="card invite-card"><h2>Пригласите участников</h2><p class="hint">Отправьте ссылку тем, с кем хотите молиться вместе. Вступить смогут те, у кого уже есть аккаунт в приложении.</p>
+        <button type="button" class="btn primary" data-act="g-invite" data-id="${esc(g.id)}">Пригласить</button></section>` : '';
+  return `<div class="nav-head">${backLink('#/groups', 'Группы')}<div class="nav-acts">
+      ${own ? `<button type="button" class="pill-btn" data-act="g-invite" data-id="${esc(g.id)}">Пригласить</button>` : ''}
+      <button type="button" class="icon-btn" data-act="g-menu" data-id="${esc(g.id)}" aria-label="Действия с группой" aria-haspopup="menu">${ICON.more}</button></div></div>
+    <div class="g-title"><h1 class="title">${esc(g.name)}</h1><span>${ms.length} ${plural(ms.length, MEMBERS)} · ${own ? 'вы создатель' : 'создатель ' + esc(nameOf(person(g.owner)))}</span></div>
+    ${alone}
+    <section class="card gweek"><div class="gw-top"><b>Неделя группы</b><span>Сегодня молились ${prayedToday(g.id)} из ${ms.length}</span></div>
+      <div class="gw-grid">${head}${rows}</div></section>
+    <h2 class="label">Общие нужды${links.length ? `<span class="side">${links.length}</span>` : ''}</h2>
+    ${links.length ? `<div class="needs">${links.map(x => gneedRow(x.l, x.n)).join('')}</div>`
+      : '<p class="hint">Здесь будут нужды, которыми участники поделились с группой. Записи молитв и файлы при этом видит только владелец нужды.</p>'}
+    <button type="button" class="dashed" data-act="g-add-need" data-id="${esc(g.id)}">+ Нужда в группу</button>`;
+}
+
+// Чужая общая нужда: только чтение. Свою нужду владелец видит как обычно, со всеми кнопками.
+function vGroupNeed(r){
+  const l = byId('glinks', r.id), g = l && byId('groups', l.group), n = linkNeed(l);
+  if(!g) return groupGone();
+  if(!n) return notFound();
+  if(n.owner === me().id) return vNeed({id: n.id, q: new URLSearchParams('g=' + g.id)});
+  const pr = prayingOf(l.id), mine = pr.some(p => p.user === me().id), owner = nameOf(person(n.owner));
+  const photo = n.photo
+    ? `<button type="button" class="need-photo" data-act="view-photo" data-id="${esc(n.id)}" aria-label="Открыть фото целиком">${imgTag(n.photo_round ? photoSrc(n, 'photo_round') : photoSrc(n, 'photo', '800x0'))}</button>` : '';
+  // заметку об ответе сервер присылает, только если владелец ею поделился
+  const answer = !n.answered_at ? ''
+    : n.answer_note ? `<div class="answer"><b>Как Бог ответил · ${fmtDay(n.answered_at)}</b><p>${esc(n.answer_note)}</p></div>`
+    : `<div class="answer"><b>Отвечено ${fmtDay(n.answered_at)}</b></div>`;
+  return `<div class="nav-head">${backLink('#/g/' + esc(g.id), g.name)}</div>
+    ${photo}
+    <div class="need-head${n.photo ? ' center' : ''}"><h1>${esc(n.title)}</h1><span>${esc(owner)} · ${fmtDay(createdISO(l))}</span></div>
+    ${n.description ? `<p class="prose">${esc(n.description)}</p>` : ''}
+    <div class="btn-row">
+      <button type="button" class="btn ${mine ? 'soft' : 'primary'}" data-act="g-pray" data-id="${esc(l.id)}" aria-pressed="${mine}">${mine ? ICON.check : ''}Молюсь</button>
+      <button type="button" class="btn outline" data-act="g-who" data-id="${esc(l.id)}"${pr.length ? '' : ' disabled'}>${pr.length ? prayCount(pr.length) : 'Никто не молится'}</button>
+    </div>
+    ${answer}
+    <p class="hint">Записи молитв и файлы этой нужды видит только ${esc(owner)}.</p>`;
+}
+
+// Приглашение по ссылке ?group=КОД: название группы и создатель, кнопка «Вступить»
+function vJoin(r){
+  const code = r.id;
+  if(!UI.join || UI.join.code !== code){ UI.join = {code, data: null, err: ''}; loadJoin(code); }
+  const j = UI.join, head = '<header class="head"><h1>Приглашение в группу</h1></header>';
+  if(j.err) return head + `<section class="card"><p>${esc(j.err)}</p><a class="btn" href="#/groups">К группам</a></section>`;
+  if(!j.data) return head + '<div class="loading">Проверяю ссылку…</div>';
+  const d = j.data;
+  const top = `<span class="join-ic" aria-hidden="true">${ICON.group}</span><h2>${esc(d.name)}</h2>
+    <p class="muted">Создатель: ${esc(d.owner || 'без имени')} · ${d.members} ${plural(d.members, MEMBERS)}</p>`;
+  if(d.member) return head + `<section class="card join-card">${top}<p>Вы уже участник этой группы.</p><a class="btn primary big wide" href="#/g/${esc(d.id)}">Открыть группу</a></section>`;
+  if(d.full) return head + `<section class="card join-card">${top}<p>В группе уже ${MAX_MEMBERS} участников, больше вступить нельзя.</p><a class="btn wide" href="#/groups">К группам</a></section>`;
+  return head + `<section class="card join-card">${top}
+    <p class="hint">Участники увидят ваше имя, фото профиля, отметки дней молитвы за текущую неделю и нужды, которыми вы сами поделитесь. Записи молитв и файлы останутся видны только вам.</p>
+    <button type="button" class="btn primary big wide" data-act="join" data-code="${esc(code)}">Вступить</button>
+    <a class="btn ghost wide" href="#/groups">Не сейчас</a></section>`;
+}
+async function loadJoin(code){
+  try { const d = await pb.send('/api/molitva/join/' + encodeURIComponent(code), {}); if(UI.join && UI.join.code === code) UI.join.data = d; }
+  catch(e){ if(UI.join && UI.join.code === code) UI.join.err = errText(e); }
+  schedule();
+}
+
+// Блок в своей нужде: в каких группах, кто молится, виден ли ответ группе
+function needShareHTML(n){
+  const ls = linksOfNeed(n.id).map(l => ({l, g: byId('groups', l.group)})).filter(x => x.g);
+  if(!ls.length) return `<button type="button" class="btn outline share-btn" data-act="share-need" data-id="${esc(n.id)}">${ICON.group}Поделиться с группой</button>`;
+  const names = ls.map(x => `<a href="#/g/${esc(x.g.id)}">${esc(x.g.name)}</a>`).join(', ');
+  const counts = ls.map(x => { const k = prayingOf(x.l.id).length; return k ? `<button type="button" class="gn-count" data-act="g-who" data-id="${esc(x.l.id)}">${ls.length > 1 ? esc(x.g.name) + ': ' : ''}${prayCount(k)}</button>` : ''; }).join('');
+  const ans = n.answered_at
+    ? `<div class="share-ans"><span>${n.answer_shared ? 'Ответ виден группе' : 'Ответ видите только вы'}</span><button type="button" class="btn sm" data-act="answer-share" data-id="${esc(n.id)}">${n.answer_shared ? 'Скрыть от группы' : 'Показать группе'}</button></div>` : '';
+  return `<section class="share"><div class="share-top">${ICON.group}<p>В группах: ${names}</p><button type="button" class="btn sm ghost" data-act="share-need" data-id="${esc(n.id)}">Изменить</button></div>
+    ${counts ? `<div class="share-counts">${counts}</div>` : ''}${ans}</section>`;
+}
+
+async function shareNeed(needId, groupId){
+  upsert('glinks', await pb.collection('group_needs').create({id: newId(), group: groupId, need: needId}));
+}
+// «Поделиться с группой»: галочки своих групп; снятая галочка убирает нужду из группы
+function openShare(n){
+  const gs = sortedGroups();
+  if(!gs.length){
+    openForm({title: 'Поделиться с группой', text: 'Поделиться нуждой можно только через группу. Создайте группу, даже из двух человек, и пригласите туда близких.', submit: 'Создать группу',
+      async onSave(){ thenOpen(openNewGroup); }});
+    return;
+  }
+  const now = linksOfNeed(n.id);
+  openForm({title: 'Поделиться с группой',
+    text: 'Нужда останется в вашем разделе, в группе появится ссылка на неё. Участники увидят название, описание и фото. Записи молитв и файлы видны только вам.' + (now.length ? ' Если снять галочку, нужда пропадёт из группы вместе с отметками «Молюсь».' : ''),
+    fields: [{key:'groups', label:'Мои группы', type:'checks', options: gs.map(g => { const k = membersOf(g.id).length; return [g.id, g.name, `${k} ${plural(k, MEMBERS)}`]; })}],
+    values: {groups: now.map(l => l.group)}, submit: 'Сохранить',
+    async onSave(v){
+      const add = v.groups.filter(id => !now.some(l => l.group === id));
+      const del = now.filter(l => !v.groups.includes(l.group));
+      for(const id of add) await shareNeed(n.id, id);
+      for(const l of del){ await pb.collection('group_needs').delete(l.id); removeLocal('glinks', l.id); }
+      toast(add.length || del.length ? 'Сохранено' : 'Без изменений');
+    }});
+}
+// «+ Нужда в группу»: выбрать из своих нужд или создать новую
+function openAddToGroup(g){
+  const inG = new Set(linksOf(g.id).map(l => l.need));
+  const avail = S.needs.filter(n => !inG.has(n.id)).sort(needSort);
+  if(!avail.length){ openNeed(null, null, g.id); return; }
+  openForm({title: 'Нужда в группу', text: `Отметьте свои нужды для группы «${g.name}» или создайте новую.`,
+    fields: [{key:'needs', label:'Мои нужды', type:'checks', options: avail.map(n => [n.id, n.title, pathOf(byId('sections', n.section)).join(' › ')])}],
+    html: '<button type="button" class="dashed" data-dlg="new">+ Создать новую нужду</button>',
+    submit: 'Добавить',
+    onClick(b){ if(b.dataset.dlg === 'new') openNeed(null, null, g.id); },
+    async onSave(v){
+      if(!v.needs.length) throw new Error('Отметьте хотя бы одну нужду или создайте новую.');
+      for(const id of v.needs) await shareNeed(id, g.id);
+      toast(v.needs.length > 1 ? 'Нужды добавлены в группу' : 'Нужда добавлена в группу');
+    }});
+}
+
+async function togglePraying(lid, btn){
+  const mine = S.gpray.find(p => p.group_need === lid && p.user === me().id);
+  btn.disabled = true;
+  try {
+    if(mine){ await pb.collection('group_praying').delete(mine.id); removeLocal('gpray', mine.id); }
+    else upsert('gpray', await pb.collection('group_praying').create({id: newId(), group_need: lid, user: me().id}));
+  } catch(e){ toast(errText(e)); refreshGroups(); }
+  finally { btn.disabled = false; }
+}
+// Список людей с кружками: участники группы или те, кто молится
+const personRow = (uid, extra) => { const u = person(uid); return `<div class="member">${faceHTML(u)}<div class="mb-main"><b>${esc(nameOf(u))}${uid === me().id ? ' (вы)' : ''}</b>${extra || ''}</div></div>`; };
+function openPraying(lid){
+  const pr = prayingOf(lid);
+  openForm({title: 'Молятся', html: pr.length ? `<div class="members">${pr.map(p => personRow(p.user)).join('')}</div>` : '<p class="hint">Пока никто не отметил «Молюсь».</p>',
+    submit: 'Готово', noCancel: true, async onSave(){}});
+}
+
+function openNewGroup(){
+  if(S.groups.length >= MAX_GROUPS){ info('Групп уже много', `Можно состоять не больше чем в ${MAX_GROUPS} группах. Чтобы создать новую, выйдите из одной из старых.`); return; }
+  openForm({title: 'Новая группа', fields: [{key:'name', label:'Название', required:true, max:100, placeholder:'Например, Семья'}], submit: 'Создать',
+    async onSave(v){
+      const res = await pb.send('/api/molitva/groups', {method: 'POST', body: {name: v.name}});
+      await loadAll(GKEYS);
+      go('#/g/' + res.id); toast('Группа создана');
+    }});
+}
+function openInvite(g){
+  const link = groupLink(g);
+  openForm({title: 'Пригласить в группу',
+    text: 'Отправьте ссылку тем, с кем хотите молиться вместе. Вступить смогут те, у кого уже есть аккаунт в приложении: регистрация по-прежнему только по приглашению администратора.',
+    html: `<div class="field"><label for="g-link">Ссылка на группу «${esc(g.name)}»</label><input type="text" id="g-link" readonly value="${esc(link)}"></div>
+      <div class="share-btns"><button type="button" class="btn primary" data-dlg="copy">Скопировать</button>${navigator.share ? '<button type="button" class="btn" data-dlg="share">Поделиться</button>' : ''}</div>`,
+    submit: 'Готово', noCancel: true, async onSave(){},
+    onClick(b){
+      if(b.dataset.dlg === 'copy') copyText(link);
+      if(b.dataset.dlg === 'share') navigator.share({title: 'Молитвенный дневник', text: `Приглашаю в группу «${g.name}» в Молитвенном дневнике`, url: link}).catch(() => {});
+    }});
+}
+function openMembers(g){
+  const own = isOwner(g);
+  const rows = membersOf(g.id).map(m => {
+    const acts = own && m.user !== me().id ? `<div class="mb-acts"><button type="button" class="btn sm" data-dlg="owner" data-id="${esc(m.user)}">Сделать создателем</button><button type="button" class="btn sm ghost danger" data-dlg="kick" data-id="${esc(m.user)}">Исключить</button></div>` : '';
+    return personRow(m.user, (m.user === g.owner ? '<span class="pill">создатель</span>' : '') + acts);
+  }).join('');
+  openForm({title: 'Участники', text: own ? 'Если исключить участника, его нужды пропадут из группы, а его отметки «Молюсь» в ней удалятся.' : '',
+    html: `<div class="members">${rows}</div>`, submit: 'Готово', noCancel: true, async onSave(){},
+    async onClick(b){
+      const kick = b.dataset.dlg === 'kick';
+      if(!arm(b, kick ? 'Точно исключить?' : 'Точно передать?')) return;
+      b.disabled = true;
+      try {
+        await pb.send(`/api/molitva/groups/${g.id}/${kick ? 'remove' : 'owner'}`, {method: 'POST', body: {user: b.dataset.id}});
+        await loadAll(GKEYS);
+        toast(kick ? 'Участник исключён' : 'Роль создателя передана');
+        const g2 = byId('groups', g.id);
+        if(g2 && dlg.open && cur && cur.title === 'Участники') openMembers(g2);
+      } catch(e){ toast(errText(e)); b.disabled = false; }
+    }});
+}
+function openRenameGroup(g){
+  openForm({title: 'Название группы', fields: [{key:'name', label:'Название', required:true, max:100}], values: g,
+    async onSave(v){ upsert('groups', await pb.collection('groups').update(g.id, {name: v.name})); toast('Сохранено'); }});
+}
+function openNewLink(g){
+  openForm({title: 'Сделать новую ссылку?', text: 'Старая ссылка сразу перестанет работать. Те, кто уже вступил, останутся в группе.', submit: 'Сделать новую',
+    async onSave(){
+      const res = await pb.send(`/api/molitva/groups/${g.id}/link`, {method: 'POST'});
+      const g2 = {...g, invite_code: res.invite_code};
+      upsert('groups', g2); thenOpen(() => openInvite(g2));
+    }});
+}
+function leaveGroup(g){
+  const own = isOwner(g);
+  if(own && membersOf(g.id).length > 1){
+    info('Сначала передайте роль создателя', 'Создатель не может просто выйти из группы. Откройте «Участники» и нажмите «Сделать создателем» рядом с тем, кто будет вести группу. После этого можно выйти.');
+    return;
+  }
+  openForm({title: 'Выйти из группы?', submit: 'Выйти', danger: true,
+    text: own ? `Вы единственный участник, поэтому группа «${g.name}» удалится.` : `Ваши нужды пропадут из группы «${g.name}», ваши отметки «Молюсь» в ней удалятся. В вашем дневнике всё останется.`,
+    async onSave(){
+      await pb.send(`/api/molitva/groups/${g.id}/leave`, {method: 'POST'});
+      await loadAll(GKEYS);
+      toast(own ? 'Группа удалена' : 'Вы вышли из группы'); go('#/groups', true);
+    }});
+}
+function deleteGroup(g){
+  openForm({title: 'Удалить группу?', submit: 'Удалить', danger: true,
+    text: `Группа «${g.name}» удалится у всех участников вместе со списком общих нужд и отметками «Молюсь». Сами нужды останутся в дневниках их владельцев.`,
+    async onSave(){ await pb.collection('groups').delete(g.id); await loadAll(GKEYS); toast('Группа удалена'); go('#/groups', true); }});
+}
+function groupMenu(btn, g){
+  const own = isOwner(g);
+  openMenu(btn, [
+    ...(own ? [{label: 'Пригласить', run: () => openInvite(g)}] : []),
+    {label: 'Участники', run: () => openMembers(g)},
+    ...(own ? [{label: 'Переименовать', run: () => openRenameGroup(g)}, {label: 'Новая ссылка', run: () => openNewLink(g)}] : []),
+    {label: 'Выйти из группы', danger: !own, run: () => leaveGroup(g)},
+    ...(own ? [{label: 'Удалить группу', danger: true, run: () => deleteGroup(g)}] : [])
+  ]);
+}
+window.addEventListener('hashchange', () => { if(['groups','g','gn'].includes(route().name) && S.loaded) loadGroupDays(); });
+
 /* ---------- Профиль ---------- */
 function vProfile(){
   const u = me();
@@ -528,7 +852,7 @@ function vProfile(){
     ${usage}
     <button type="button" class="btn wide" data-act="logout">Выйти</button>
     <details class="fold"><summary><span>Удаление аккаунта</span>${ICON.chev}</summary><div class="fold-body">
-      <p class="hint">Вместе с аккаунтом удалятся все разделы, нужды, записи молитв, стихи, фото и файлы. Вернуть их будет нельзя.</p>
+      <p class="hint">Вместе с аккаунтом удалятся все разделы, нужды, записи молитв, стихи, фото и файлы. Вернуть их будет нельзя. Ваши нужды пропадут из групп; группы, где вы создатель, перейдут к другому участнику.</p>
       <button type="button" class="btn danger" data-act="delete-account">Удалить аккаунт и все данные</button></div></details>
     <p class="hint"><a href="/privacy.html" target="_blank" rel="noopener">Политика конфиденциальности</a></p>`;
 }
@@ -915,6 +1239,11 @@ function fieldHTML(fd, v){
   const id = 'fld-' + fd.key, val = v ?? '';
   if(fd.type === 'photo') return `<div class="field"><span class="flabel">${esc(fd.label)}</span><div class="ph-pick" id="ph-pick">${phPickInner(val, fd.has)}</div>
       <p class="hint" style="font-size:12.5px">JPG, PNG, WEBP или HEIC, до 10 МБ.</p></div>`;
+  // галочка: значение да/нет
+  if(fd.type === 'check') return `<label class="check-row"><input type="checkbox" id="${id}"${val ? ' checked' : ''}><span><b>${esc(fd.label)}</b>${fd.hint ? `<small>${esc(fd.hint)}</small>` : ''}</span></label>`;
+  // несколько галочек: options = [[значение, подпись, пояснение]], значение поля = список отмеченных
+  if(fd.type === 'checks') return `<fieldset class="checks"><legend class="flabel">${esc(fd.label)}</legend>${(fd.options || []).map(([k, l, sub]) =>
+    `<label class="check-row"><input type="checkbox" name="${id}" value="${esc(k)}"${(val || []).includes(k) ? ' checked' : ''}><span><b>${esc(l)}</b>${sub ? `<small>${esc(sub)}</small>` : ''}</span></label>`).join('')}</fieldset>`;
   let input;
   if(fd.type === 'textarea') input = `<textarea id="${id}" rows="${fd.rows || 4}" maxlength="${fd.max || 10000}" placeholder="${esc(fd.placeholder || '')}">${esc(val)}</textarea>`;
   else if(fd.type === 'select') input = `<select id="${id}">${(fd.options || []).map(([k, l]) => `<option value="${esc(k)}"${String(val) === String(k) ? ' selected' : ''}>${esc(l)}</option>`).join('')}</select>`;
@@ -927,7 +1256,7 @@ const phPickInner = (src, has) => `<span class="thumb round">${imgTag(src) || IC
 function openForm(o){
   cur = {...o, saved: false, ph: null};
   form.innerHTML = `<div class="dlg-head"><h2>${esc(o.title)}</h2><button type="button" class="icon-btn" data-close aria-label="Закрыть">×</button></div>
-    <div class="dlg-body">${o.text ? `<p class="dlg-text">${esc(o.text)}</p>` : ''}${(o.fields || []).map(fd => fieldHTML(fd, (o.values || {})[fd.key])).join('')}</div>
+    <div class="dlg-body">${o.text ? `<p class="dlg-text">${esc(o.text)}</p>` : ''}${(o.fields || []).map(fd => fieldHTML(fd, (o.values || {})[fd.key])).join('')}${o.html || ''}</div>
     <p class="dlg-err" id="dlg-err" hidden></p>
     <div class="dlg-foot">${o.onDelete ? `<button type="button" class="btn ghost danger" id="dlg-del">${esc(o.deleteLabel || 'Удалить')}</button>` : ''}${o.noCancel ? '' : '<button type="button" class="btn" data-close>Отмена</button>'}<button type="submit" class="btn ${o.danger ? 'danger-fill' : 'primary'}" id="dlg-ok">${esc(o.submit || 'Сохранить')}</button></div>`;
   if(!dlg.open) dlg.showModal();
@@ -939,7 +1268,9 @@ function collect(){
   const v = {};
   for(const fd of cur.fields || []){
     if(fd.type === 'photo') continue;
-    const el = form.querySelector('#fld-' + fd.key); v[fd.key] = el ? el.value.trim() : '';
+    if(fd.type === 'checks'){ v[fd.key] = [...form.querySelectorAll(`input[name="fld-${fd.key}"]:checked`)].map(i => i.value); continue; }
+    const el = form.querySelector('#fld-' + fd.key);
+    v[fd.key] = fd.type === 'check' ? !!(el && el.checked) : el ? el.value.trim() : '';
   }
   return v;
 }
@@ -956,6 +1287,9 @@ form.addEventListener('submit', async e => {
 });
 form.addEventListener('click', async e => {
   if(e.target.closest('[data-close]')){ dlg.close(); return; }
+  // свои кнопки внутри окна (группы: скопировать ссылку, исключить и т. п.)
+  const own = e.target.closest('[data-dlg]');
+  if(own && cur && cur.onClick){ cur.onClick(own); return; }
   if(e.target.closest('#ph-remove')){
     cur.ph = {remove: true};
     $('#ph-pick').innerHTML = phPickInner('', false);
@@ -986,6 +1320,8 @@ function formPhoto(){
   else pickPhoto(file => cropPhoto({...o, file, canRemove: false}).then(done));
 }
 dlg.addEventListener('close', () => { const c = cur; cur = null; c && c.onClose && c.onClose(c.saved); });
+// Открыть следующее окно после того, как текущее закроется (событие close приходит не сразу)
+function thenOpen(fn){ if(dlg.open) dlg.addEventListener('close', () => setTimeout(fn, 0), {once: true}); else fn(); }
 function arm(btn, text){
   if(btn.dataset.armed === '1') return true;
   btn.dataset.armed = '1'; const old = btn.textContent; btn.textContent = text;
@@ -1019,10 +1355,15 @@ function errText(e){
 }
 
 /* ---------- Формы ---------- */
-function openNeed(needId, sectionId){
+// groupId: новая нужда для группы, тогда спрашиваем, в какой раздел дневника её положить
+function openNeed(needId, sectionId, groupId){
   const n = needId ? byId('needs', needId) : null;
-  openForm({title: n ? 'Изменить нужду' : 'Новая нужда',
+  const g = groupId ? byId('groups', groupId) : null;
+  if(g && !S.sections.length){ info('Сначала создайте раздел', 'Каждая нужда лежит в разделе вашего дневника. Создайте раздел на главной, потом добавьте нужду в группу.'); return; }
+  openForm({title: n ? 'Изменить нужду' : g ? 'Новая нужда в группу' : 'Новая нужда',
+    text: g ? `Нужда появится в группе «${g.name}» и в выбранном разделе вашего дневника.` : '',
     fields: [
+      ...(g ? [{key:'section', label:'Раздел дневника', type:'select', options: sectionOptions()}] : []),
       {key:'title', label:'Название', required:true, placeholder:'Например, здоровье мамы'},
       {key:'description', label:'Описание', type:'textarea', rows:4, max:5000, placeholder:'О чём молиться (по желанию)'},
       {key:'photo', label:'Фото (по желанию)', type:'photo', has: !!(n && n.photo)}],
@@ -1033,8 +1374,11 @@ function openNeed(needId, sectionId){
       const data = {title: v.title, description: v.description};
       if(c.ph && !(c.ph.remove && !n)) Object.assign(data, photoData(c.ph));
       if(n) await col('needs').doc(n.id).update(data);
-      else await col('needs').doc().create({...data, section: sectionId, answered_at: '', answer_note: '', last_prayed_at: ''});
-      toast(n ? 'Сохранено' : 'Нужда добавлена');
+      else {
+        const rec = await col('needs').doc().create({...data, section: g ? v.section : sectionId, answered_at: '', answer_note: '', last_prayed_at: ''});
+        if(g) await shareNeed(rec.id, g.id);
+      }
+      toast(n ? 'Сохранено' : g ? 'Нужда добавлена в группу' : 'Нужда добавлена');
     }});
 }
 function sectionOptions(){
@@ -1048,18 +1392,22 @@ function openMoveNeed(n){
 }
 function confirmDeleteNeed(n){
   const p = S.prayers.filter(x => x.need === n.id).length, f = S.files.filter(x => x.need === n.id).length;
-  openForm({title: 'Удалить нужду?', text: `«${n.title}» удалится вместе с записями молитв (${p}) и файлами (${f}). Вернуть их будет нельзя.`, submit: 'Удалить', danger: true,
+  const gs = linksOfNeed(n.id).length ? ' Она пропадёт и из групп.' : '';
+  openForm({title: 'Удалить нужду?', text: `«${n.title}» удалится вместе с записями молитв (${p}) и файлами (${f}). Вернуть их будет нельзя.${gs}`, submit: 'Удалить', danger: true,
     async onSave(){
       await col('needs').doc(n.id).delete();
-      S.prayers = S.prayers.filter(x => x.need !== n.id); S.files = S.files.filter(x => x.need !== n.id);
+      S.prayers = S.prayers.filter(x => x.need !== n.id); S.files = S.files.filter(x => x.need !== n.id); S.glinks = S.glinks.filter(x => x.need !== n.id);
       toast('Нужда удалена'); go('#/s/' + n.section, true);
     }});
 }
 function openAnswered(n){
+  // «Поделиться ответом с группой» показываем, только если нужда отдана хотя бы в одну группу
+  const shared = linksOfNeed(n.id).length > 0;
   openForm({title: n.answered_at ? 'Отвечено' : 'Молитва отвечена',
-    fields: [{key:'answered_at', label:'Когда', type:'date', required:true}, {key:'answer_note', label:'Как Бог ответил', type:'textarea', rows:4, max:2000, placeholder:'Коротко, по желанию'}],
-    values: {answered_at: n.answered_at || todayISO(), answer_note: n.answer_note || ''},
-    onDelete: n.answered_at ? async () => { await col('needs').doc(n.id).update({answered_at: '', answer_note: ''}); toast('Пометка снята'); } : null,
+    fields: [{key:'answered_at', label:'Когда', type:'date', required:true}, {key:'answer_note', label:'Как Бог ответил', type:'textarea', rows:4, max:2000, placeholder:'Коротко, по желанию'},
+      ...(shared ? [{key:'answer_shared', label:'Поделиться ответом с группой', type:'check', hint:'Заметку увидят участники всех групп, где есть эта нужда.'}] : [])],
+    values: {answered_at: n.answered_at || todayISO(), answer_note: n.answer_note || '', answer_shared: !!n.answer_shared},
+    onDelete: n.answered_at ? async () => { await col('needs').doc(n.id).update({answered_at: '', answer_note: '', answer_shared: false}); toast('Пометка снята'); } : null,
     deleteLabel: 'Снять пометку', confirmText: 'Точно снять?',
     async onSave(v){ await col('needs').doc(n.id).update(v); toast('Отмечено: молитва отвечена'); }});
 }
@@ -1303,7 +1651,30 @@ document.addEventListener('click', async e => {
     case 'answered': { const n = byId('needs', d.id); if(n) openAnswered(n); break; }
     case 'new-prayer': openPrayer(null, d.id); break;
     case 'edit-prayer': openPrayer(d.id); break;
-    case 'view-photo': { const n = byId('needs', d.id); if(n) openPhoto(n); break; }
+    case 'view-photo': { const n = byId('needs', d.id) || byId('shared', d.id); if(n) openPhoto(n); break; }
+    case 'new-group': openNewGroup(); break;
+    case 'g-menu': { const g = byId('groups', d.id); if(g) groupMenu(a, g); break; }
+    case 'g-invite': { const g = byId('groups', d.id); if(g) openInvite(g); break; }
+    case 'g-add-need': { const g = byId('groups', d.id); if(g) openAddToGroup(g); break; }
+    case 'g-pray': togglePraying(d.id, a); break;
+    case 'g-who': openPraying(d.id); break;
+    case 'share-need': { const n = byId('needs', d.id); if(n) openShare(n); break; }
+    case 'answer-share': {
+      const n = byId('needs', d.id); if(!n) return;
+      a.disabled = true;
+      try { await col('needs').doc(n.id).update({answer_shared: !n.answer_shared}); toast(n.answer_shared ? 'Ответ виден только вам' : 'Ответ виден группе'); }
+      catch(err){ toast(errText(err)); a.disabled = false; }
+      break;
+    }
+    case 'join': {
+      a.disabled = true;
+      try {
+        const res = await pb.send('/api/molitva/join/' + encodeURIComponent(d.code), {method: 'POST'});
+        await loadAll(GKEYS); UI.join = null;
+        toast('Вы вступили в группу'); go('#/g/' + res.id, true);
+      } catch(err){ toast(errText(err)); a.disabled = false; }
+      break;
+    }
     case 'view-file': { const f = byId('files', d.id); if(f) openFile(f); break; }
     case 'dl-file': { const f = byId('files', d.id); if(f) downloadFile(f); break; }
     case 'del-file': {
@@ -1366,9 +1737,13 @@ async function showAuth(mode, invite){
 function renderAuth(msg, ok){
   const b = $('#auth-body');
   const note = msg ? `<p class="${ok ? 'form-ok' : 'form-err'}">${esc(msg)}</p>` : '';
+  // пришли по ссылке в группу: после входа приложение предложит вступить
+  const joinNote = loadLS('join', '') ? `<p class="auth-note">Вас пригласили в группу. ${authMode === 'register'
+    ? 'Зарегистрироваться можно только по коду приглашения в само приложение от администратора. После регистрации приложение предложит вступить в группу.'
+    : 'Войдите, и приложение предложит вступить. Если аккаунта ещё нет, сначала нужно приглашение в само приложение от администратора: регистрация только по нему.'}</p>` : '';
   if(authMode === 'register'){
     $('#auth-sub').textContent = isFirstRun ? 'Создайте аккаунт владельца. Вы станете администратором и сможете приглашать других.' : 'Регистрация по приглашению.';
-    b.innerHTML = `<form class="stack" id="auth-form" data-mode="register" novalidate>
+    b.innerHTML = `<form class="stack" id="auth-form" data-mode="register" novalidate>${joinNote}
       ${isFirstRun ? '' : `<label>Код приглашения<input type="text" id="a-invite" autocomplete="off" autocapitalize="characters" value="${esc(authInvite)}" required></label>`}
       <label>Имя<input type="text" id="a-name" autocomplete="name"></label>
       <label>Почта<input type="email" id="a-email" autocomplete="email" required></label>
@@ -1387,7 +1762,7 @@ function renderAuth(msg, ok){
     </form>`;
   } else {
     $('#auth-sub').textContent = 'Нужды, молитвы и дни молитвы в одном месте.';
-    b.innerHTML = `<form class="stack" id="auth-form" data-mode="login" novalidate>
+    b.innerHTML = `<form class="stack" id="auth-form" data-mode="login" novalidate>${joinNote}
       <label>Почта<input type="email" id="a-email" autocomplete="email" required></label>
       <label>Пароль<input type="password" id="a-pass" autocomplete="current-password" required></label>
       ${note}<button class="btn primary big wide" type="submit">Войти</button>
