@@ -210,7 +210,7 @@ onRecordEnrich((e) => {
 
 // Фильтры и сортировка в общих коллекциях: только безопасные поля (см. checkQuery в lib.js).
 onRecordsListRequest((e) => { require(`${__hooks}/lib.js`).checkQuery(e); e.next(); },
-  "needs", "users", "groups", "group_members", "group_needs", "group_praying");
+  "needs", "users", "groups", "group_members", "group_needs", "group_praying", "group_days");
 
 // Подписки на живые обновления без фильтров: приложению они не нужны, а через них можно подбирать скрытые поля.
 onRealtimeSubscribeRequest((e) => {
@@ -252,21 +252,38 @@ onRecordCreateRequest((e) => {
   e.next();
 }, "group_needs");
 
-// «Молюсь»: только участник группы, где лежит общая нужда; группу записывает сервер.
+// «Помолился» у общей нужды: только за сегодня, только участник группы, где лежит нужда, и не у отвеченной нужды.
+// Группу и участника записывает сервер, он же ставит день молитвы в группе (group_days).
+// Личный дневник (prayer_days, last_prayed_at у нужды) эта отметка не трогает.
 onRecordCreateRequest((e) => {
+  const lib = require(`${__hooks}/lib.js`);
   if (!e.hasSuperuserAuth()) {
-    const lib = require(`${__hooks}/lib.js`);
+    const date = e.record.getString("date");
+    lib.checkGroupDate(date);
     let gn = null;
     try { gn = $app.findRecordById("group_needs", e.record.getString("group_need")); } catch (_) {}
     if (!gn) throw new NotFoundError("Нужда уже убрана из группы.");
     lib.memberGroup($app, gn.getString("group"), e.auth.id);
-    if ($app.countRecords("group_praying", $dbx.hashExp({ group_need: gn.id, user: e.auth.id })) > 0) {
-      throw new BadRequestError("Вы уже отметили «Молюсь».");
+    let need = null;
+    try { need = $app.findRecordById("needs", gn.getString("need")); } catch (_) {}
+    if (!need) throw new NotFoundError("Нужда уже удалена.");
+    if (need.getString("answered_at")) throw new BadRequestError("На эту нужду уже есть ответ: отмечать молитву за неё больше не нужно.");
+    if ($app.countRecords("group_praying", $dbx.hashExp({ group_need: gn.id, user: e.auth.id, date })) > 0) {
+      throw new BadRequestError("Вы уже отметили эту нужду сегодня.");
     }
     e.record.set("group", gn.getString("group"));
     e.record.set("user", e.auth.id);
   }
   e.next();
+  lib.markGroupDay($app, e.record.getString("group"), e.record.getString("user"), e.record.getString("date"));
+}, "group_praying");
+
+// Снять можно только свою отметку (правило) и только за сегодня. Последняя снятая отметка дня снимает и день в группе.
+onRecordDeleteRequest((e) => {
+  const lib = require(`${__hooks}/lib.js`);
+  if (!e.hasSuperuserAuth()) lib.checkGroupDate(e.record.getString("date"));
+  e.next();
+  lib.unmarkGroupDay($app, e.record.getString("group"), e.record.getString("user"), e.record.getString("date"));
 }, "group_praying");
 
 // Удаление аккаунта: группы, где человек создатель, переходят к другому участнику или удаляются.
@@ -367,26 +384,4 @@ routerAdd("POST", "/api/molitva/groups/{id}/leave", (e) => {
   }
   $app.runInTransaction((tx) => lib.removeMember(tx, g.id, e.auth.id));
   return e.json(200, { deleted: false });
-}, GROUP_AUTH);
-
-// Неделя групп: отметки дня всех, с кем вы в общей группе, только за 7 дней с from.
-// from (понедельник по часам телефона) должен быть не раньше чем 7 дней назад по UTC сервера,
-// поэтому старые отметки другим участникам не видны никогда.
-routerAdd("GET", "/api/molitva/group-days", (e) => {
-  const from = String((e.requestInfo().query || {})["from"] || "");
-  const day = (k) => new Date(Date.now() + k * 864e5).toISOString().slice(0, 10);
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(from) || from < day(-7) || from > day(1)) {
-    throw new BadRequestError("Неделю группы можно посмотреть только за текущую неделю.");
-  }
-  const to = new Date(Date.parse(from + "T00:00:00Z") + 6 * 864e5).toISOString().slice(0, 10);
-  const rows = arrayOf(new DynamicModel({ user: "", date: "" }));
-  $app.db().newQuery(
-    "SELECT DISTINCT pd.user AS user, pd.date AS date FROM prayer_days pd " +
-    "JOIN group_members a ON a.user = pd.user " +
-    "JOIN group_members b ON b.[[group]] = a.[[group]] " +
-    "WHERE b.user = {:me} AND pd.date >= {:from} AND pd.date <= {:to}"
-  ).bind({ me: e.auth.id, from, to }).all(rows);
-  const days = {};
-  for (const r of rows) (days[r.user] = days[r.user] || []).push(r.date);
-  return e.json(200, { from, to, days });
 }, GROUP_AUTH);

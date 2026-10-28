@@ -18,10 +18,11 @@ const MB = 1024*1024;
 const MAX_PHOTO = 10*MB, MAX_FILE = 20*MB;
 const FILE_EXT = ['pdf','doc','docx','jpg','jpeg','png','gif','webp','heic','heif'];
 const PBN = {sections:'sections', needs:'needs', files:'need_files', prayers:'prayers', verses:'verses', days:'prayer_days', daily:'daily_verses',
-  groups:'groups', gmembers:'group_members', glinks:'group_needs', gpray:'group_praying', people:'users', shared:'needs'};
+  groups:'groups', gmembers:'group_members', glinks:'group_needs', gpray:'group_praying', gdays:'group_days', people:'users', shared:'needs'};
 const KEYS = Object.keys(PBN);
-// Группы: needs = свои нужды, shared = чужие нужды из общих групп (только чтение), people = участники общих групп
-const GKEYS = ['groups','gmembers','glinks','gpray','people','shared'];
+// Группы: needs = свои нужды, shared = чужие нужды из общих групп (только чтение), people = участники общих групп,
+// gpray = отметки «Помолился» у общих нужд (с датой), gdays = дни молитвы участников в группах (ставит сервер)
+const GKEYS = ['groups','gmembers','glinks','gpray','gdays','people','shared'];
 const MAX_MEMBERS = 20, MAX_GROUPS = 10;
 
 /* ---------- Значки ---------- */
@@ -49,7 +50,7 @@ const ICON = {
 
 /* ---------- Состояние ---------- */
 const S = {sections:[], needs:[], files:[], prayers:[], verses:[], days:[], daily:[], invites:[], usage:null, loaded:false,
-  groups:[], gmembers:[], glinks:[], gpray:[], people:[], shared:[], gdays:{}};
+  groups:[], gmembers:[], glinks:[], gpray:[], gdays:[], people:[], shared:[]};
 const loadLS = (k, d) => { try { const v = localStorage.getItem('mol_'+k); return v == null ? d : JSON.parse(v); } catch(e){ return d; } };
 const saveLS = (k, v) => { try { localStorage.setItem('mol_'+k, JSON.stringify(v)); } catch(e){} };
 const UI = {reorder:'', filesOpen:false, form:null, hops:0, verseDay:undefined, verseAt:0, join:null};
@@ -146,25 +147,18 @@ function col(key){
     };
   } };
 }
-// Свои нужды и чужие (из общих групп) лежат в одной коллекции: разделяем по владельцу
-const LIST_FILTER = {needs: () => pb.filter('owner = {:me}', {me: me().id}), shared: () => pb.filter('owner != {:me}', {me: me().id})};
+// Свои нужды и чужие (из общих групп) лежат в одной коллекции: разделяем по владельцу.
+// Молитва в группах: отметки нужд со вчерашнего дня (на случай смены даты), дни группы с понедельника.
+const LIST_FILTER = {needs: () => pb.filter('owner = {:me}', {me: me().id}), shared: () => pb.filter('owner != {:me}', {me: me().id}),
+  gpray: () => pb.filter('date >= {:d}', {d: addDays(todayISO(), -1)}), gdays: () => pb.filter('date >= {:d}', {d: weekStart()})};
 async function loadAll(keys = KEYS){
   const res = await Promise.all(keys.map(k => pb.collection(PBN[k]).getFullList({batch: 500, ...(LIST_FILTER[k] ? {filter: LIST_FILTER[k]()} : {})})));
   keys.forEach((k, n) => { S[k] = res[n]; });
   schedule();
-  if(keys.includes('gmembers')) loadGroupDays(true);
 }
 // Изменилось что-то в группах: доступ к чужим нуждам и участникам мог появиться или пропасть, перечитываем всё групповое
 let gTimer = 0;
 function refreshGroups(){ clearTimeout(gTimer); gTimer = setTimeout(() => loadAll(GKEYS).catch(() => {}), 300); }
-// Неделя группы: отметки дня участников общих групп за текущую неделю (сервер отдаёт только её)
-let gdaysAt = 0;
-async function loadGroupDays(force){
-  if(!force && Date.now() - gdaysAt < 60e3) return;
-  gdaysAt = Date.now();
-  if(!S.groups.length){ S.gdays = {}; return; }
-  try { S.gdays = (await pb.send('/api/molitva/group-days', {query: {from: weekStart()}})).days || {}; schedule(); } catch(e){}
-}
 let subscribed = false;
 async function subscribeAll(){
   if(subscribed) return; subscribed = true;
@@ -540,14 +534,15 @@ const nameOf = u => (u && u.name) || 'Без имени';
 const linksOf = gid => S.glinks.filter(l => l.group === gid);
 const linksOfNeed = nid => S.glinks.filter(l => l.need === nid);
 const linkNeed = l => l ? byId('needs', l.need) || byId('shared', l.need) : null;
-const prayingOf = lid => S.gpray.filter(p => p.group_need === lid).sort(byCreated);
+// Кто сегодня отметил «Помолился» у общей нужды
+const prayingOf = lid => { const t = todayISO(); return S.gpray.filter(p => p.group_need === lid && p.date === t).sort(byCreated); };
 const isOwner = g => !!g && g.owner === me().id;
 const MEMBERS = ['участник','участника','участников'];
-const prayCount = n => `${n % 10 === 1 && n % 100 !== 11 ? 'молится' : 'молятся'} ${n}`;
+const prayCount = n => n ? `Сегодня молились: ${n}` : 'Сегодня ещё никто не молился';
 const groupLink = g => `${location.origin}/?group=${g.invite_code || ''}`;
-// Отметки дня участника: свои берём из дневника, чужие с сервера (только текущая неделя)
-const marksOf = uid => uid === me().id ? S.days.map(d => d.date) : S.gdays[uid] || [];
-const prayedToday = gid => { const t = todayISO(); return membersOf(gid).filter(m => marksOf(m.user).includes(t)).length; };
+// Дни молитвы участника в группе: день есть, если он отметил хотя бы одну нужду этой группы. Личный дневник не учитывается.
+const marksOf = (gid, uid) => S.gdays.filter(d => d.group === gid && d.user === uid).map(d => d.date);
+const prayedToday = gid => { const t = todayISO(); return membersOf(gid).filter(m => marksOf(gid, m.user).includes(t)).length; };
 const faceHTML = (u, cls) => `<span class="face${cls ? ' ' + cls : ''}" aria-hidden="true">${avatarInner(u)}</span>`;
 const groupGone = () => `<div class="nav-head">${backLink('#/groups', 'Группы')}</div>
   <div class="card"><p>Группа не найдена: возможно, её удалили или вас из неё исключили.</p><a class="btn" href="#/groups">К группам</a></div>`;
@@ -568,18 +563,26 @@ function vGroups(){
     <button type="button" class="${list.length ? 'dashed' : 'btn primary big wide'}" data-act="new-group"${full ? ' disabled' : ''}>${full ? `Вы уже в ${MAX_GROUPS} группах` : list.length ? '+ Создать группу' : 'Создать группу'}</button>`;
 }
 
-// Общая нужда в списке группы: фото, название, кто добавил и когда, «Молюсь» и счётчик
+// Кнопка «Помолился» у общей нужды (как на главной) и счётчик «Сегодня молились»
+function gPrayBtn(l){ const on = prayingOf(l.id).some(p => p.user === me().id);
+  return `<button type="button" class="pray-btn${on ? ' on' : ''}" data-act="g-pray" data-id="${esc(l.id)}" aria-pressed="${on}">${on ? ICON.check : ''}<span>Помолился</span></button>`; }
+function gCount(l){ const k = prayingOf(l.id).length;
+  return k ? `<button type="button" class="gn-count" data-act="g-who" data-id="${esc(l.id)}">${prayCount(k)}</button>` : `<span class="gn-count none">${prayCount(0)}</span>`; }
+// заметку об ответе сервер присылает участникам, только если владелец ею поделился
+const sharedNote = n => n.answered_at && n.answer_shared && n.answer_note ? n.answer_note : '';
+
+// Общая нужда в списке группы: фото, название, кто добавил и когда, «Помолился» и счётчик.
+// У отвеченной нужды вместо кнопки пометка «Отвечено» и заметка, если владелец ею поделился.
 function gneedRow(l, n){
   const src = n.photo ? roundSrc(n) : '';
   const pic = src ? imgTag(src) : n.photo ? '' : n.answered_at ? ICON.check : ICON.hands;
-  const pr = prayingOf(l.id), mine = pr.some(p => p.user === me().id);
   const who = l.added_by === me().id ? 'Вы' : nameOf(person(l.added_by));
   const href = n.owner === me().id ? `#/n/${esc(n.id)}?g=${esc(l.group)}` : `#/gn/${esc(l.id)}`;
+  const note = sharedNote(n);
   return `<div class="gneed${n.answered_at ? ' answered' : ''}">
     <a class="gn-main" href="${href}"><span class="pic${n.answered_at && !n.photo ? ' ok' : ''}" aria-hidden="true">${pic}</span>
-      <span class="txt"><b>${esc(n.title)}</b><span class="when">${esc(who)} · ${fmtDay(createdISO(l))}</span>${n.answered_at ? `<span class="pill">Отвечено ${fmtDay(n.answered_at)}</span>` : ''}</span></a>
-    <button type="button" class="molus" data-act="g-pray" data-id="${esc(l.id)}" aria-pressed="${mine}">${mine ? ICON.check : ''}<span>Молюсь</span></button>
-    ${pr.length ? `<button type="button" class="gn-count" data-act="g-who" data-id="${esc(l.id)}">${prayCount(pr.length)}</button>` : ''}</div>`;
+      <span class="txt"><b>${esc(n.title)}</b><span class="when">${esc(who)} · ${fmtDay(createdISO(l))}</span></span></a>
+    ${n.answered_at ? `<span class="pill gn-ans">Отвечено ${fmtDay(n.answered_at)}</span>${note ? `<p class="gn-note">${esc(note)}</p>` : ''}` : gPrayBtn(l) + gCount(l)}</div>`;
 }
 
 function vGroup(r){
@@ -590,7 +593,7 @@ function vGroup(r){
   const wi = monIndex(new Date()), dates = WDM.map((_, k) => addDays(weekStart(), k));
   const head = `<span></span>${WDM.map((l, k) => `<span class="gw-l${k === wi ? ' today' : ''}" aria-hidden="true">${l}</span>`).join('')}`;
   const rows = ms.map(m => {
-    const u = person(m.user), marks = marksOf(m.user), mine = m.user === me().id;
+    const u = person(m.user), marks = marksOf(g.id, m.user), mine = m.user === me().id;
     const cnt = dates.filter(d => marks.includes(d)).length;
     return `<span class="gw-who">${faceHTML(u, 'sm')}<span class="nm${mine ? ' self' : ''}">${esc(nameOf(u))}${mine ? ' (вы)' : ''}</span>
         <span class="sr">: на этой неделе ${cnt} из 7 дней, сегодня ${marks.includes(dates[wi]) ? 'отмечено' : 'не отмечено'}</span></span>` +
@@ -621,22 +624,18 @@ function vGroupNeed(r){
   if(!g) return groupGone();
   if(!n) return notFound();
   if(n.owner === me().id) return vNeed({id: n.id, q: new URLSearchParams('g=' + g.id)});
-  const pr = prayingOf(l.id), mine = pr.some(p => p.user === me().id), owner = nameOf(person(n.owner));
+  const owner = nameOf(person(n.owner));
   const photo = n.photo
     ? `<button type="button" class="need-photo" data-act="view-photo" data-id="${esc(n.id)}" aria-label="Открыть фото целиком">${imgTag(n.photo_round ? photoSrc(n, 'photo_round') : photoSrc(n, 'photo', '800x0'))}</button>` : '';
-  // заметку об ответе сервер присылает, только если владелец ею поделился
+  const note = sharedNote(n);
   const answer = !n.answered_at ? ''
-    : n.answer_note ? `<div class="answer"><b>Как Бог ответил · ${fmtDay(n.answered_at)}</b><p>${esc(n.answer_note)}</p></div>`
+    : note ? `<div class="answer"><b>Как Бог ответил · ${fmtDay(n.answered_at)}</b><p>${esc(note)}</p></div>`
     : `<div class="answer"><b>Отвечено ${fmtDay(n.answered_at)}</b></div>`;
   return `<div class="nav-head">${backLink('#/g/' + esc(g.id), g.name)}</div>
     ${photo}
     <div class="need-head${n.photo ? ' center' : ''}"><h1>${esc(n.title)}</h1><span>${esc(owner)} · ${fmtDay(createdISO(l))}</span></div>
     ${n.description ? `<p class="prose">${esc(n.description)}</p>` : ''}
-    <div class="btn-row">
-      <button type="button" class="btn ${mine ? 'soft' : 'primary'}" data-act="g-pray" data-id="${esc(l.id)}" aria-pressed="${mine}">${mine ? ICON.check : ''}Молюсь</button>
-      <button type="button" class="btn outline" data-act="g-who" data-id="${esc(l.id)}"${pr.length ? '' : ' disabled'}>${pr.length ? prayCount(pr.length) : 'Никто не молится'}</button>
-    </div>
-    ${answer}
+    ${n.answered_at ? answer : `<div class="gn-pray">${gPrayBtn(l)}${gCount(l)}</div>`}
     <p class="hint">Записи молитв и файлы этой нужды видит только ${esc(owner)}.</p>`;
 }
 
@@ -653,7 +652,7 @@ function vJoin(r){
   if(d.member) return head + `<section class="card join-card">${top}<p>Вы уже участник этой группы.</p><a class="btn primary big wide" href="#/g/${esc(d.id)}">Открыть группу</a></section>`;
   if(d.full) return head + `<section class="card join-card">${top}<p>В группе уже ${MAX_MEMBERS} участников, больше вступить нельзя.</p><a class="btn wide" href="#/groups">К группам</a></section>`;
   return head + `<section class="card join-card">${top}
-    <p class="hint">Участники увидят ваше имя, фото профиля, отметки дней молитвы за текущую неделю и нужды, которыми вы сами поделитесь. Записи молитв и файлы останутся видны только вам.</p>
+    <p class="hint">Участники увидят ваше имя, фото профиля, в какие дни вы молились в группе, за какие общие нужды молились сегодня, и нужды, которыми вы сами поделитесь. Записи молитв и файлы останутся видны только вам.</p>
     <button type="button" class="btn primary big wide" data-act="join" data-code="${esc(code)}">Вступить</button>
     <a class="btn ghost wide" href="#/groups">Не сейчас</a></section>`;
 }
@@ -668,7 +667,7 @@ function needShareHTML(n){
   const ls = linksOfNeed(n.id).map(l => ({l, g: byId('groups', l.group)})).filter(x => x.g);
   if(!ls.length) return `<button type="button" class="btn outline share-btn" data-act="share-need" data-id="${esc(n.id)}">${ICON.group}Поделиться с группой</button>`;
   const names = ls.map(x => `<a href="#/g/${esc(x.g.id)}">${esc(x.g.name)}</a>`).join(', ');
-  const counts = ls.map(x => { const k = prayingOf(x.l.id).length; return k ? `<button type="button" class="gn-count" data-act="g-who" data-id="${esc(x.l.id)}">${ls.length > 1 ? esc(x.g.name) + ': ' : ''}${prayCount(k)}</button>` : ''; }).join('');
+  const counts = n.answered_at ? '' : ls.map(x => { const k = prayingOf(x.l.id).length; return k ? `<button type="button" class="gn-count" data-act="g-who" data-id="${esc(x.l.id)}">${ls.length > 1 ? esc(x.g.name) + ': ' : ''}${prayCount(k)}</button>` : ''; }).join('');
   const ans = n.answered_at
     ? `<div class="share-ans"><span>${n.answer_shared ? 'Ответ виден группе' : 'Ответ видите только вы'}</span><button type="button" class="btn sm" data-act="answer-share" data-id="${esc(n.id)}">${n.answer_shared ? 'Скрыть от группы' : 'Показать группе'}</button></div>` : '';
   return `<section class="share"><div class="share-top">${ICON.group}<p>В группах: ${names}</p><button type="button" class="btn sm ghost" data-act="share-need" data-id="${esc(n.id)}">Изменить</button></div>
@@ -688,7 +687,7 @@ function openShare(n){
   }
   const now = linksOfNeed(n.id);
   openForm({title: 'Поделиться с группой',
-    text: 'Нужда останется в вашем разделе, в группе появится ссылка на неё. Участники увидят название, описание и фото. Записи молитв и файлы видны только вам.' + (now.length ? ' Если снять галочку, нужда пропадёт из группы вместе с отметками «Молюсь».' : ''),
+    text: 'Нужда останется в вашем разделе, в группе появится ссылка на неё. Участники увидят название, описание и фото. Записи молитв и файлы видны только вам.' + (now.length ? ' Если снять галочку, нужда пропадёт из группы. Дни, когда участники за неё молились, в неделе группы останутся.' : ''),
     fields: [{key:'groups', label:'Мои группы', type:'checks', options: gs.map(g => { const k = membersOf(g.id).length; return [g.id, g.name, `${k} ${plural(k, MEMBERS)}`]; })}],
     values: {groups: now.map(l => l.group)}, submit: 'Сохранить',
     async onSave(v){
@@ -716,12 +715,16 @@ function openAddToGroup(g){
     }});
 }
 
+// «Помолился» у общей нужды: отметка только за сегодня, повторное нажатие снимает её.
+// День молитвы в группе ставит и снимает сервер, поэтому после нажатия перечитываем дни групп.
+// Личную отметку дня и «последнюю молитву» у нужды это нажатие не трогает.
 async function togglePraying(lid, btn){
-  const mine = S.gpray.find(p => p.group_need === lid && p.user === me().id);
+  const mine = prayingOf(lid).find(p => p.user === me().id);
   btn.disabled = true;
   try {
     if(mine){ await pb.collection('group_praying').delete(mine.id); removeLocal('gpray', mine.id); }
-    else upsert('gpray', await pb.collection('group_praying').create({id: newId(), group_need: lid, user: me().id}));
+    else upsert('gpray', await pb.collection('group_praying').create({id: newId(), group_need: lid, user: me().id, date: todayISO()}));
+    loadAll(['gdays']).catch(() => {});
   } catch(e){ toast(errText(e)); refreshGroups(); }
   finally { btn.disabled = false; }
 }
@@ -729,7 +732,7 @@ async function togglePraying(lid, btn){
 const personRow = (uid, extra) => { const u = person(uid); return `<div class="member">${faceHTML(u)}<div class="mb-main"><b>${esc(nameOf(u))}${uid === me().id ? ' (вы)' : ''}</b>${extra || ''}</div></div>`; };
 function openPraying(lid){
   const pr = prayingOf(lid);
-  openForm({title: 'Молятся', html: pr.length ? `<div class="members">${pr.map(p => personRow(p.user)).join('')}</div>` : '<p class="hint">Пока никто не отметил «Молюсь».</p>',
+  openForm({title: 'Сегодня молились', html: pr.length ? `<div class="members">${pr.map(p => personRow(p.user)).join('')}</div>` : '<p class="hint">Сегодня за эту нужду ещё никто не отметил «Помолился».</p>',
     submit: 'Готово', noCancel: true, async onSave(){}});
 }
 
@@ -760,7 +763,7 @@ function openMembers(g){
     const acts = own && m.user !== me().id ? `<div class="mb-acts"><button type="button" class="btn sm" data-dlg="owner" data-id="${esc(m.user)}">Сделать создателем</button><button type="button" class="btn sm ghost danger" data-dlg="kick" data-id="${esc(m.user)}">Исключить</button></div>` : '';
     return personRow(m.user, (m.user === g.owner ? '<span class="pill">создатель</span>' : '') + acts);
   }).join('');
-  openForm({title: 'Участники', text: own ? 'Если исключить участника, его нужды пропадут из группы, а его отметки «Молюсь» в ней удалятся.' : '',
+  openForm({title: 'Участники', text: own ? 'Если исключить участника, его нужды пропадут из группы, а его отметки молитвы в ней удалятся.' : '',
     html: `<div class="members">${rows}</div>`, submit: 'Готово', noCancel: true, async onSave(){},
     async onClick(b){
       const kick = b.dataset.dlg === 'kick';
@@ -794,7 +797,7 @@ function leaveGroup(g){
     return;
   }
   openForm({title: 'Выйти из группы?', submit: 'Выйти', danger: true,
-    text: own ? `Вы единственный участник, поэтому группа «${g.name}» удалится.` : `Ваши нужды пропадут из группы «${g.name}», ваши отметки «Молюсь» в ней удалятся. В вашем дневнике всё останется.`,
+    text: own ? `Вы единственный участник, поэтому группа «${g.name}» удалится.` : `Ваши нужды пропадут из группы «${g.name}», ваши отметки молитвы в ней удалятся. В вашем дневнике всё останется.`,
     async onSave(){
       await pb.send(`/api/molitva/groups/${g.id}/leave`, {method: 'POST'});
       await loadAll(GKEYS);
@@ -803,7 +806,7 @@ function leaveGroup(g){
 }
 function deleteGroup(g){
   openForm({title: 'Удалить группу?', submit: 'Удалить', danger: true,
-    text: `Группа «${g.name}» удалится у всех участников вместе со списком общих нужд и отметками «Молюсь». Сами нужды останутся в дневниках их владельцев.`,
+    text: `Группа «${g.name}» удалится у всех участников вместе со списком общих нужд и отметками молитвы. Сами нужды останутся в дневниках их владельцев.`,
     async onSave(){ await pb.collection('groups').delete(g.id); await loadAll(GKEYS); toast('Группа удалена'); go('#/groups', true); }});
 }
 function groupMenu(btn, g){
@@ -816,7 +819,12 @@ function groupMenu(btn, g){
     ...(own ? [{label: 'Удалить группу', danger: true, run: () => deleteGroup(g)}] : [])
   ]);
 }
-window.addEventListener('hashchange', () => { if(['groups','g','gn'].includes(route().name) && S.loaded) loadGroupDays(); });
+// Открыли группы: освежаем отметки молитвы не чаще раза в минуту (живые обновления могли прерваться, мог смениться день)
+let gprayAt = 0;
+window.addEventListener('hashchange', () => {
+  if(!['groups','g','gn'].includes(route().name) || !S.loaded || Date.now() - gprayAt < 60e3) return;
+  gprayAt = Date.now(); loadAll(['gpray','gdays']).catch(() => {});
+});
 
 /* ---------- Профиль ---------- */
 function vProfile(){

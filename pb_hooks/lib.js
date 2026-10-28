@@ -167,12 +167,40 @@ function addMember(app, groupId, userId) {
   app.save(m);
 }
 
-// Человек выходит или его исключают: его нужды пропадают из группы, его «Молюсь» в группе удаляются.
+// Человек выходит или его исключают: его нужды пропадают из группы, его отметки молитвы в группе удаляются.
 // В его личном дневнике всё остаётся.
 function removeMember(app, groupId, userId) {
   for (const r of app.findAllRecords("group_needs", $dbx.hashExp({ group: groupId, added_by: userId }))) app.delete(r);
   for (const r of app.findAllRecords("group_praying", $dbx.hashExp({ group: groupId, user: userId }))) app.delete(r);
+  for (const r of app.findAllRecords("group_days", $dbx.hashExp({ group: groupId, user: userId }))) app.delete(r);
   for (const r of app.findAllRecords("group_members", $dbx.hashExp({ group: groupId, user: userId }))) app.delete(r);
+}
+
+// Молитва в группе только за сегодня (по часам телефона).
+// Сервер разрешает от 1 дня назад до 1 дня вперёд: запас на разницу часовых поясов.
+function checkGroupDate(date) {
+  const day = (k) => new Date(Date.now() + k * 864e5).toISOString().slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date || "") || date < day(-1) || date > day(1)) {
+    throw new BadRequestError("Отметить молитву в группе можно только за сегодня. Проверьте дату на телефоне.");
+  }
+}
+
+// День молитвы участника в группе (group_days): есть, пока у него за этот день есть хотя бы одна отметка нужды.
+// Нужду потом убрали из группы или удалили: отметки нужды пропадают каскадом, а день остаётся.
+function markGroupDay(app, groupId, userId, date) {
+  if (app.countRecords("group_days", $dbx.hashExp({ group: groupId, user: userId, date })) > 0) return;
+  const d = new Record(app.findCollectionByNameOrId("group_days"));
+  d.set("group", groupId);
+  d.set("user", userId);
+  d.set("date", date);
+  try { app.save(d); } catch (err) {
+    // одновременно отметили две нужды: день уже записан вторым запросом
+    if (app.countRecords("group_days", $dbx.hashExp({ group: groupId, user: userId, date })) === 0) throw err;
+  }
+}
+function unmarkGroupDay(app, groupId, userId, date) {
+  if (app.countRecords("group_praying", $dbx.hashExp({ group: groupId, user: userId, date })) > 0) return;
+  for (const r of app.findAllRecords("group_days", $dbx.hashExp({ group: groupId, user: userId, date }))) app.delete(r);
 }
 
 // Аккаунт создателя удаляется: группа переходит к участнику, который вступил раньше всех, а если никого нет, удаляется
@@ -190,7 +218,7 @@ function handOverGroups(app, userId) {
 
 // Фильтры и сортировка в запросах к общим коллекциям: только безопасные поля.
 // Так через фильтр нельзя подобрать скрытое содержимое (заметку об ответе, почту, раздел, код ссылки).
-const QUERY_FIELDS = ["id", "owner", "user", "group", "need", "group_need", "added_by", "created", "updated", "name", "title", "true", "false", "null", "@request.auth.id", "@random"];
+const QUERY_FIELDS = ["id", "owner", "user", "group", "need", "group_need", "added_by", "date", "created", "updated", "name", "title", "true", "false", "null", "@request.auth.id", "@random"];
 function checkQuery(e) {
   if (e.hasSuperuserAuth()) return;
   const q = e.requestInfo().query || {};
@@ -206,4 +234,5 @@ function checkQuery(e) {
 module.exports = {
   MB, quotaBytes, usedBytes, checkQuota, checkSectionDepth, checkSection, recordPhoto, checkDayDate, addDefaultVerse, FILE_EXT,
   MAX_MEMBERS, MAX_GROUPS, newGroupCode, groupByCode, isMember, memberGroup, ownGroup, checkGroupLimit, addMember, removeMember, handOverGroups, checkQuery,
+  checkGroupDate, markGroupDay, unmarkGroupDay,
 };
