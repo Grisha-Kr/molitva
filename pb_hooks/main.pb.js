@@ -49,6 +49,16 @@ onRecordCreateRequest((e) => {
   }
 }, "users");
 
+// Каждый новый пользователь сразу получает первый стих в «Моих стихах».
+onRecordAfterCreateSuccess((e) => {
+  e.next();
+  try {
+    require(`${__hooks}/lib.js`).addDefaultVerse(e.record.id);
+  } catch (err) {
+    $app.logger().error("Не удалось добавить стих по умолчанию", "user", e.record.id, "error", String(err));
+  }
+}, "users");
+
 // Кто создал приглашение, записывает сервер.
 onRecordCreateRequest((e) => {
   if (e.auth) e.record.set("created_by", e.auth.id);
@@ -58,8 +68,9 @@ onRecordCreateRequest((e) => {
 }, "invites");
 
 // Разделы: глубина не больше двух (раздел на главной и подраздел внутри него).
-onRecordCreateRequest((e) => { if (!e.hasSuperuserAuth()) require(`${__hooks}/lib.js`).checkSectionDepth(e); e.next(); }, "sections");
-onRecordUpdateRequest((e) => { if (!e.hasSuperuserAuth()) require(`${__hooks}/lib.js`).checkSectionDepth(e); e.next(); }, "sections");
+// Фото подраздела: размер считает сервер, он входит в лимит места.
+onRecordCreateRequest((e) => { if (!e.hasSuperuserAuth() && e.auth) require(`${__hooks}/lib.js`).checkSection(e); e.next(); }, "sections");
+onRecordUpdateRequest((e) => { if (!e.hasSuperuserAuth() && e.auth) require(`${__hooks}/lib.js`).checkSection(e); e.next(); }, "sections");
 
 // Удалить можно только пустой раздел: без подразделов и нужд.
 onRecordDeleteRequest((e) => {
@@ -83,9 +94,13 @@ onRecordCreateRequest((e) => {
   e.next();
 }, "verses");
 
-// Фото нужды: размер считает сервер, общий объём фото и файлов на пользователя ограничен.
-onRecordCreateRequest((e) => { if (!e.hasSuperuserAuth() && e.auth) require(`${__hooks}/lib.js`).needPhoto(e); e.next(); }, "needs");
-onRecordUpdateRequest((e) => { if (!e.hasSuperuserAuth() && e.auth) require(`${__hooks}/lib.js`).needPhoto(e); e.next(); }, "needs");
+// Фото нужды (исходник и круглый вариант): размер считает сервер, общий объём фото и файлов на пользователя ограничен.
+onRecordCreateRequest((e) => { if (!e.hasSuperuserAuth() && e.auth) require(`${__hooks}/lib.js`).recordPhoto(e, "needs"); e.next(); }, "needs");
+onRecordUpdateRequest((e) => { if (!e.hasSuperuserAuth() && e.auth) require(`${__hooks}/lib.js`).recordPhoto(e, "needs"); e.next(); }, "needs");
+
+// Отметки дней: только за сегодня, вчера и позавчера.
+onRecordCreateRequest((e) => { if (!e.hasSuperuserAuth()) require(`${__hooks}/lib.js`).checkDayDate(e.record.getString("date")); e.next(); }, "prayer_days");
+onRecordDeleteRequest((e) => { if (!e.hasSuperuserAuth()) require(`${__hooks}/lib.js`).checkDayDate(e.record.getString("date")); e.next(); }, "prayer_days");
 
 // Файлы нужды: только pdf, doc, docx и картинки; размер считает сервер.
 onRecordCreateRequest((e) => {
@@ -101,7 +116,7 @@ onRecordCreateRequest((e) => {
     if (lib.FILE_EXT.indexOf(ext) < 0) throw new BadRequestError("Можно прикреплять только PDF, Word (doc, docx) и картинки.");
     add += f.size;
   }
-  lib.checkQuota(e.auth.id, add, "");
+  lib.checkQuota(e.auth.id, add, "", "");
   e.record.set("size", add);
   e.next();
 }, "need_files");
@@ -148,5 +163,5 @@ routerAdd("GET", "/api/molitva/setup", (e) => {
 // Сколько места заняли фото и файлы пользователя.
 routerAdd("GET", "/api/molitva/usage", (e) => {
   const lib = require(`${__hooks}/lib.js`);
-  return e.json(200, { used: lib.usedBytes(e.auth.id, ""), quota: lib.quotaBytes() });
+  return e.json(200, { used: lib.usedBytes(e.auth.id, "", ""), quota: lib.quotaBytes() });
 }, $apis.requireAuth());

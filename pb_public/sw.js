@@ -1,7 +1,7 @@
 // Сервис-воркер: хранит оболочку приложения, чтобы оно быстро открывалось.
 // Данные (/api/) никогда не кэшируются.
-const VERSION = 'molitva-v1';
-const SHELL = ['/', '/index.html', '/app.css?v=1', '/app.js?v=1', '/vendor/pocketbase.umd.js', '/manifest.webmanifest', '/icons/icon-192.png', '/img/stone.webp'];
+const VERSION = 'molitva-v2';
+const SHELL = ['/', '/index.html', '/app.css?v=2', '/app.js?v=2', '/vendor/pocketbase.umd.js', '/manifest.webmanifest', '/icons/icon-192.png?v=2', '/img/stone.webp', '/img/water.webp', '/img/wave-mask.svg'];
 
 self.addEventListener('install', e => {
   e.waitUntil(caches.open(VERSION).then(c => c.addAll(SHELL)).then(() => self.skipWaiting()));
@@ -16,7 +16,7 @@ self.addEventListener('fetch', e => {
   // Сначала сеть, при отсутствии связи берём из кэша
   e.respondWith(
     fetch(e.request).then(res => {
-      if (res.ok && (url.pathname === '/' || /\.(html|css|js|woff2|png|webp|webmanifest)$/.test(url.pathname))) {
+      if (res.ok && (url.pathname === '/' || /\.(html|css|js|woff2|png|webp|svg|webmanifest)$/.test(url.pathname))) {
         const copy = res.clone();
         caches.open(VERSION).then(c => c.put(e.request, copy));
       }

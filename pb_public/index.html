@@ -9,13 +9,13 @@
 <meta name="theme-color" content="#171815" media="(prefers-color-scheme: dark)">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-title" content="Дневник">
+<meta name="apple-mobile-web-app-title" content="Молитва">
 <meta name="apple-mobile-web-app-status-bar-style" content="default">
 <link rel="manifest" href="/manifest.webmanifest">
-<link rel="icon" href="/icons/favicon-64.png" type="image/png">
-<link rel="apple-touch-icon" href="/icons/apple-touch-icon.png">
+<link rel="icon" href="/icons/favicon-64.png?v=2" type="image/png">
+<link rel="apple-touch-icon" href="/icons/apple-touch-icon.png?v=2">
 <link rel="preload" href="/img/stone.webp" as="image" type="image/webp">
-<link rel="stylesheet" href="/app.css?v=1">
+<link rel="stylesheet" href="/app.css?v=2">
 <script>try{var t=JSON.parse(localStorage.getItem('mol_theme')||'""');if(t==='light'||t==='dark')document.documentElement.setAttribute('data-theme',t);}catch(e){}</script>
 </head>
 <body>
@@ -41,9 +41,24 @@
 
 <dialog id="dlg"><form id="dlg-form" novalidate></form></dialog>
 <dialog id="viewer" aria-label="Просмотр"><div class="v-head"><h2 id="v-title"></h2><button type="button" class="btn sm" id="v-dl">Скачать</button><button type="button" class="icon-btn" id="v-close" aria-label="Закрыть">×</button></div><div class="v-body" id="v-body"></div></dialog>
+<dialog id="cal" aria-label="Мои молитвы"></dialog>
+<dialog id="crop" aria-labelledby="crop-title">
+  <div class="crop-head"><button type="button" class="crop-link" id="crop-cancel">Отмена</button><h2 id="crop-title">Фото</h2><button type="button" class="crop-link strong" id="crop-done">Готово</button></div>
+  <div class="crop-body">
+    <div class="crop-stage" id="crop-stage"><img id="crop-img" alt="Фото для обрезки"><span class="crop-ring" aria-hidden="true"></span><p class="crop-msg" id="crop-msg" hidden></p></div>
+    <p class="crop-hint">Передвиньте фото пальцем, чтобы нужное оказалось в круге. Двумя пальцами, колесом мыши или ползунком можно увеличить.</p>
+    <div class="crop-zoom">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6.5"/><path d="M8 11h6M16 16l4 4"/></svg>
+      <label for="crop-z" class="sr">Увеличение</label><input type="range" id="crop-z" min="1" max="4" step="0.01" value="1">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6.5"/><path d="M8 11h6M11 8v6M16 16l4 4"/></svg>
+    </div>
+    <div class="crop-pv"><div class="crop-pv-box" id="crop-pv" aria-hidden="true"></div><div><b id="crop-pv-text">Так будет выглядеть</b><span>Меняется сразу, пока вы двигаете фото.</span></div></div>
+    <div class="crop-foot"><label class="crop-link upload" for="crop-file">Выбрать другое фото<input type="file" id="crop-file" accept="image/*,.heic,.heif"></label><button type="button" class="crop-link danger" id="crop-remove">Убрать фото</button></div>
+  </div>
+</dialog>
 <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
 <script src="/vendor/pocketbase.umd.js"></script>
-<script src="/app.js?v=1"></script>
+<script src="/app.js?v=2"></script>
 </body>
 </html>

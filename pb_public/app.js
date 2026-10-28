@@ -17,7 +17,7 @@ const MAX_VERSES = 7;
 const MB = 1024*1024;
 const MAX_PHOTO = 10*MB, MAX_FILE = 20*MB;
 const FILE_EXT = ['pdf','doc','docx','jpg','jpeg','png','gif','webp','heic','heif'];
-const PBN = {sections:'sections', needs:'needs', files:'need_files', prayers:'prayers', verses:'verses', days:'prayer_days'};
+const PBN = {sections:'sections', needs:'needs', files:'need_files', prayers:'prayers', verses:'verses', days:'prayer_days', daily:'daily_verses'};
 const KEYS = Object.keys(PBN);
 
 /* ---------- Значки ---------- */
@@ -30,7 +30,8 @@ const ICON = {
   clip: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11.5l-8 8a5 5 0 0 1-7-7l8.5-8.5a3.3 3.3 0 0 1 4.7 4.7L9.7 17a1.7 1.7 0 0 1-2.4-2.4L15 7"/></svg>',
   chev: '<svg class="chev" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg>',
   check: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>',
-  candle: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3c1.6 2 2.2 3.1 2.2 4.1a2.2 2.2 0 0 1-4.4 0c0-1 .6-2.1 2.2-4.1z"/><rect x="8.5" y="11" width="7" height="10" rx="1.2"/></svg>',
+  // сложенные руки: Phosphor Icons, лицензия MIT (icons/LICENSE-phosphor-icons.txt)
+  hands: '<svg class="hands" viewBox="0 0 256 256" fill="currentColor" aria-hidden="true"><path d="M233.9,181.42l-36.59-36.6L160.71,24A19.75,19.75,0,0,0,128,15.62,19.75,19.75,0,0,0,95.29,24L58.69,144.82,22.1,181.42a14,14,0,0,0,0,19.79L54.79,233.9a14,14,0,0,0,19.79,0l48.29-48.28a38,38,0,0,0,5.13-6.38,38,38,0,0,0,5.13,6.38l48.29,48.28a14,14,0,0,0,19.79,0l32.69-32.69a14,14,0,0,0,0-19.79Zm-167.8,44a2,2,0,0,1-2.83,0L30.58,192.73a2,2,0,0,1,0-2.83l14.11-14.1L80.2,211.31Zm48.28-48.29-25.69,25.7L53.17,167.31l15.07-15.07a6,6,0,0,0,1.5-2.5l37-122.22A7.78,7.78,0,0,1,122,29.78v129A25.83,25.83,0,0,1,114.38,177.13ZM134,158.75v-129a7.78,7.78,0,0,1,15.22-2.26l37,122.22a6,6,0,0,0,1.5,2.5l15.93,15.94-36.28,34.74-25.79-25.79A25.83,25.83,0,0,1,134,158.75Zm91.42,34-32.69,32.69a2,2,0,0,1-2.83,0l-14-14,36.29-34.74,13.24,13.23A2,2,0,0,1,225.42,192.73Z"/></svg>',
   photo: '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2"/><circle cx="9" cy="10" r="1.6"/><path d="M21 16l-5-5-9 8"/></svg>',
   book: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5.5C4 4.7 4.7 4 5.5 4H11v16H5.5C4.7 20 4 19.3 4 18.5z M20 5.5C20 4.7 19.3 4 18.5 4H13v16h5.5c.8 0 1.5-.7 1.5-1.5z"/></svg>',
   up: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 15l6-6 6 6"/></svg>',
@@ -42,10 +43,10 @@ const ICON = {
 };
 
 /* ---------- Состояние ---------- */
-const S = {sections:[], needs:[], files:[], prayers:[], verses:[], days:[], invites:[], usage:null, loaded:false};
+const S = {sections:[], needs:[], files:[], prayers:[], verses:[], days:[], daily:[], invites:[], usage:null, loaded:false};
 const loadLS = (k, d) => { try { const v = localStorage.getItem('mol_'+k); return v == null ? d : JSON.parse(v); } catch(e){ return d; } };
 const saveLS = (k, v) => { try { localStorage.setItem('mol_'+k, JSON.stringify(v)); } catch(e){} };
-const UI = {reorder:'', filesOpen:false, form:null, hops:0};
+const UI = {reorder:'', filesOpen:false, form:null, hops:0, verseDay:undefined, verseAt:0};
 const pb = new PocketBase(location.origin);
 pb.autoCancellation(false);
 const me = () => pb.authStore.record || {};
@@ -77,8 +78,12 @@ const dnum = iso => { const [y,m,d] = iso.split('-').map(Number); return Date.UT
 const diff = iso => Math.round(dnum(todayISO()) - dnum(iso)); // сколько дней прошло
 const addDays = (iso, k) => { const [y,m,d] = iso.split('-').map(Number); return isoOf(new Date(y, m-1, d + k)); };
 const MONF = ['января','февраля','марта','апреля','мая','июня','июля','августа','сентября','октября','ноября','декабря'];
-const WD = ['Вс','Пн','Вт','Ср','Чт','Пт','Сб'];
+const MONN = ['Январь','Февраль','Март','Апрель','Май','Июнь','Июль','Август','Сентябрь','Октябрь','Ноябрь','Декабрь'];
+const MONP = ['январе','феврале','марте','апреле','мае','июне','июле','августе','сентябре','октябре','ноябре','декабре'];
+const WDM = ['Пн','Вт','Ср','Чт','Пт','Сб','Вс']; // неделя с понедельника
 const WDF = ['Воскресенье','Понедельник','Вторник','Среда','Четверг','Пятница','Суббота'];
+const monIndex = d => (d.getDay() + 6) % 7; // 0 = понедельник
+const canMark = iso => { const k = diff(iso); return k >= 0 && k <= 2; }; // сегодня, вчера, позавчера
 function fmtDay(iso){
   if(!iso) return '';
   const [y,m,d] = iso.split('-').map(Number);
@@ -219,6 +224,7 @@ function render(force){
   const tab = ['profile','verses','answers'].includes(r.name) ? 'profile' : 'diary';
   document.querySelectorAll('.tab').forEach(t => t.setAttribute('aria-current', t.dataset.tab === tab ? 'page' : 'false'));
   const m = $('#main');
+  if(calDlg.open) renderCal();
   if(!S.loaded){ m.innerHTML = '<div class="loading">Загружаю…</div>'; return; }
   const isForm = r.name === 'new' || r.name === 'edit';
   // форма раздела не перерисовывается от живых обновлений, чтобы не сбить ввод
@@ -230,6 +236,9 @@ function render(force){
 const notFound = () => `<div class="card"><p>Запись не найдена: возможно, её уже удалили.</p><a class="btn" href="#/">На главную</a></div>`;
 const backLink = (href, text) => `<a class="back" href="${href}">${ICON.back}<span>${esc(text)}</span></a>`;
 const initial = u => (String(u.name || u.email || '?').trim()[0] || '?').toUpperCase();
+const imgTag = src => src ? `<img src="${esc(src)}" alt="">` : '';
+// Кружок профиля: фото или первая буква имени
+const avatarInner = u => (u.avatar && imgTag(photoSrc(u, 'avatar'))) || esc(initial(u));
 
 /* ---------- Камни ---------- */
 const stoneBg = s => `background-color:${colorOf(s).c}`;
@@ -241,15 +250,27 @@ function stoneHTML(s){
     <span class="stone-name${String(s.name).length > 10 ? ' long' : ''}">${esc(s.name)}</span><span class="stone-count">${count}</span></a>`;
 }
 const addStone = (href, label) => `<a class="stone-btn add" href="${href}" aria-label="${label}"><span class="stone-shadow" aria-hidden="true"></span><span class="stone empty" aria-hidden="true"></span>${ICON.plus}</a>`;
-// Сетка камней; в режиме «Переставить» под каждым стрелки влево и вправо
-function stonesGrid(list, scope, addHref, addLabel){
+/* ---------- Подразделы: вода ---------- */
+const WATER = '<span class="water" aria-hidden="true"></span><span class="water-shade" aria-hidden="true"></span>';
+// Круглое фото нужды или подраздела; у старых фото без круга берётся середина миниатюры
+const roundSrc = r => r.photo_round ? photoSrc(r, 'photo_round') : photoSrc(r, 'photo', '120x120');
+function subHTML(s){
+  const n = needsIn(s.id).length, label = `${esc(s.name)}, ${n} ${plural(n, NEEDS)}`;
+  if(s.photo) return `<div class="sub-cell"><a class="sub-tile has-photo" href="#/s/${esc(s.id)}" aria-label="${label}">${WATER}<span class="sub-ph" aria-hidden="true">${imgTag(roundSrc(s))}</span><span class="sub-name">${esc(s.name)}</span></a></div>`;
+  return `<div class="sub-cell"><a class="sub-tile" href="#/s/${esc(s.id)}" aria-label="${label}">${WATER}<span class="sub-name">${esc(s.name)}</span></a>
+    <button type="button" class="sub-add" data-act="sub-photo" data-id="${esc(s.id)}" aria-label="Добавить фото для подраздела ${esc(s.name)}"><span>${ICON.plus}</span></button></div>`;
+}
+const addSub = (href, label) => `<div class="sub-cell"><a class="sub-tile add" href="${href}" aria-label="${label}"><span class="water" aria-hidden="true"></span>${ICON.plus}</a></div>`;
+// Сетка камней или воды; в режиме «Переставить» под каждым стрелки влево и вправо
+function stonesGrid(list, scope, addHref, addLabel, water){
   const mode = UI.reorder === scope;
+  const cell = water ? subHTML : stoneHTML;
   const cells = list.map((s, i) => mode
-    ? `<div class="stone-cell">${stoneHTML(s)}<div class="move"><button class="icon-btn" data-act="move" data-key="sections" data-scope="${scope}" data-id="${esc(s.id)}" data-dir="-1" aria-label="Переставить левее"${i ? '' : ' disabled'}>${ICON.left}</button><button class="icon-btn" data-act="move" data-key="sections" data-scope="${scope}" data-id="${esc(s.id)}" data-dir="1" aria-label="Переставить правее"${i < list.length - 1 ? '' : ' disabled'}>${ICON.right}</button></div></div>`
-    : stoneHTML(s)).join('');
-  const add = addHref && !mode ? addStone(addHref, addLabel) : '';
-  const toggle = list.length > 1 ? `<div class="row-actions"><button class="btn ghost sm" data-act="reorder" data-scope="${scope}">${mode ? 'Готово' : 'Переставить камни'}</button></div>` : '';
-  return `<div class="stones">${cells}${add}</div>${toggle}`;
+    ? `<div class="stone-cell">${cell(s)}<div class="move"><button class="icon-btn" data-act="move" data-key="sections" data-scope="${scope}" data-id="${esc(s.id)}" data-dir="-1" aria-label="Переставить левее"${i ? '' : ' disabled'}>${ICON.left}</button><button class="icon-btn" data-act="move" data-key="sections" data-scope="${scope}" data-id="${esc(s.id)}" data-dir="1" aria-label="Переставить правее"${i < list.length - 1 ? '' : ' disabled'}>${ICON.right}</button></div></div>`
+    : cell(s)).join('');
+  const add = addHref && !mode ? (water ? addSub : addStone)(addHref, addLabel) : '';
+  const toggle = list.length > 1 ? `<div class="row-actions"><button class="btn ghost sm" data-act="reorder" data-scope="${scope}">${mode ? 'Готово' : water ? 'Переставить' : 'Переставить камни'}</button></div>` : '';
+  return `<div class="${water ? 'subs' : 'stones'}">${cells}${add}</div>${toggle}`;
 }
 
 /* ---------- Главная ---------- */
@@ -261,25 +282,43 @@ function currentVerse(){
   if(p[1] > 0 && list.length > 1){ const days = Math.round(dnum(todayISO()) - dnum(VERSE_EPOCH)); i = ((Math.floor(days / p[1]) % list.length) + list.length) % list.length; }
   return {v: list[i], i, n: list.length};
 }
+// Стих дня один для всех: по кругу через список daily_verses в порядке sort
+function dailyVerse(){
+  const list = [...S.daily].sort(bySort);
+  if(!list.length) return null;
+  const days = Math.round(dnum(todayISO()) - dnum(VERSE_EPOCH));
+  return list[((days % list.length) + list.length) % list.length];
+}
+// Стих после молитвы: виден, пока сегодня отмечено. Мягко появляется, когда отметку только что поставили;
+// при перерисовке анимация продолжается с того же места (отрицательная задержка)
+function dayVerseHTML(marked, t){
+  if(!marked){ UI.verseDay = ''; return ''; }
+  if(UI.verseDay !== t){ UI.verseAt = UI.verseDay === undefined ? 0 : Date.now(); UI.verseDay = t; }
+  const v = dailyVerse();
+  if(!v) return '';
+  const el = Date.now() - UI.verseAt, anim = el < 900 ? ` anim" style="animation-delay:-${el}ms` : '';
+  return `<div class="day-verse${anim}"><span class="text">${esc(v.text)}</span>${v.ref ? `<span class="ref">${esc(v.ref)}</span>` : ''}</div>`;
+}
 function vHome(){
   const cv = currentVerse();
   const verse = cv
     ? `<a class="verse" href="#/verses"><span class="top"><span>Мой стих</span>${cv.n > 1 ? `<span>${cv.i + 1} из ${cv.n}</span>` : ''}</span><span class="text">${esc(cv.v.text)}</span>${cv.v.ref ? `<span class="ref">${esc(cv.v.ref)}</span>` : ''}</a>`
     : `<button type="button" class="verse empty-verse" data-act="new-verse"><span class="top"><span>Мой стих</span></span><span class="text">Нажмите, чтобы вписать стих, который хотите держать перед глазами</span></button>`;
-  const t = todayISO(), now = new Date();
+  // неделя с понедельника по воскресенье; будущие дни бледные
+  const t = todayISO(), now = new Date(), wi = monIndex(now), mon = addDays(t, -wi);
   let done = 0;
-  const days = [6,5,4,3,2,1,0].map(k => {
-    const iso = addDays(t, -k), on = !!dayRec(iso);
+  const days = WDM.map((l, k) => {
+    const iso = addDays(mon, k), on = !!dayRec(iso);
     if(on) done++;
-    const [y,m,d] = iso.split('-').map(Number);
-    return `<div class="day${on ? ' on' : ''}${k === 0 ? ' today' : ''}" title="${fmtDay(iso)}${on ? ', молился' : ''}"><span>${WD[new Date(y, m-1, d).getDay()]}</span><i></i></div>`;
+    return `<span class="day${on ? ' on' : ''}${k === wi ? ' today' : ''}${k > wi ? ' future' : ''}"><span>${l}</span><i></i></span>`;
   }).join('');
   const marked = !!dayRec(t);
-  const week = `<section class="card"><div class="week-top"><b>${WDF[now.getDay()]}, ${now.getDate()} ${MONF[now.getMonth()]}</b><span>${done} из 7 дней</span></div>
-    <div class="week" aria-label="Последние 7 дней: молился ${done} из 7">${days}</div>
-    <button type="button" class="btn big wide ${marked ? 'outline' : 'primary'}" data-act="today" aria-pressed="${marked}">${marked ? 'Отмечено: сегодня молился' : 'Сегодня молился'}</button></section>`;
+  const week = `<section class="card week-card"><div class="week-top"><div class="wt"><b>${WDF[now.getDay()]}, ${now.getDate()} ${MONF[now.getMonth()]}</b><span>на этой неделе ${done} из 7 дней</span></div>
+      <button type="button" class="pray-btn${marked ? ' on' : ''}" data-act="today" aria-pressed="${marked}">${marked ? ICON.check : ''}<span>Помолился</span></button></div>
+    <button type="button" class="week" data-act="calendar" aria-label="На этой неделе молился ${done} из 7 дней. Открыть календарь молитв">${days}</button>
+    ${dayVerseHTML(marked, t)}</section>`;
   const tops = topSections();
-  return `<header class="head"><h1>Молитвенный дневник</h1><a class="me" href="#/profile" aria-label="Профиль">${esc(initial(me()))}</a></header>
+  return `<header class="head"><h1>Молитвенный дневник</h1><a class="me" href="#/profile" aria-label="Профиль">${avatarInner(me())}</a></header>
     ${verse}${week}
     <h2 class="label">Мои разделы</h2>
     ${stonesGrid(tops, 'home', '#/new', 'Создать раздел')}
@@ -288,12 +327,18 @@ function vHome(){
 
 /* ---------- Раздел ---------- */
 function needRow(n){
-  const src = photoSrc(n, '120x120');
-  const pic = n.photo && src ? `<img src="${esc(src)}" alt="">` : (n.answered_at ? ICON.check : ICON.candle);
+  const src = n.photo ? roundSrc(n) : '';
+  const pic = src ? imgTag(src) : n.photo ? '' : n.answered_at ? ICON.check : ICON.hands;
   const first = String(n.description || '').split('\n').find(x => x.trim()) || '';
   const when = n.answered_at ? `<span class="pill">Отвечено ${fmtDay(n.answered_at)}</span>` : `<span class="when">${prayedText(n.last_prayed_at)}</span>`;
-  return `<a class="need-row${n.answered_at ? ' answered' : ''}" href="#/n/${esc(n.id)}"><span class="pic${n.answered_at && !(n.photo && src) ? ' ok' : ''}" aria-hidden="true">${pic}</span>
+  return `<a class="need-row${n.answered_at ? ' answered' : ''}" href="#/n/${esc(n.id)}"><span class="pic${n.answered_at && !n.photo ? ' ok' : ''}" aria-hidden="true">${pic}</span>
     <span class="txt"><b>${esc(n.title)}</b>${first ? `<span class="desc">${esc(first)}</span>` : ''}${when}</span></a>`;
+}
+// Значок в шапке раздела: камень, у подраздела круглое фото или маленькая вода
+function secMini(s){
+  if(!s.parent) return `<span class="mini" aria-hidden="true"><span class="stone" style="${stoneBg(s)}"></span></span>`;
+  if(s.photo) return `<span class="mini-round" aria-hidden="true">${imgTag(roundSrc(s))}</span>`;
+  return `<span class="mini-water" aria-hidden="true"><span class="water"></span></span>`;
 }
 function vSection(r){
   const s = byId('sections', r.id);
@@ -304,8 +349,8 @@ function vSection(r){
   const counter = [subs.length ? `${subs.length} ${plural(subs.length, SUBS)}` : '', `${needs.length} ${plural(needs.length, NEEDS)}`].filter(Boolean).join(' · ');
   return `<div class="nav-head">${parent ? backLink('#/s/' + esc(parent.id), parent.name) : backLink('#/', 'Главная')}
       <button type="button" class="icon-btn" data-act="sec-menu" data-id="${esc(s.id)}" aria-label="Действия с разделом: изменить, удалить" aria-haspopup="menu">${ICON.more}</button></div>
-    <div class="sec-title"><span class="mini" aria-hidden="true"><span class="stone" style="${stoneBg(s)}"></span></span><div><h1>${esc(s.name)}</h1><span>${counter}</span></div></div>
-    ${parent ? '' : `<h2 class="label">Подразделы</h2>${stonesGrid(subs, 's:' + s.id, '#/new?in=' + esc(s.id), 'Создать подраздел')}`}
+    <div class="sec-title">${secMini(s)}<div><h1>${esc(s.name)}</h1><span>${counter}</span></div></div>
+    ${parent ? '' : `<h2 class="label">Подразделы</h2>${stonesGrid(subs, 's:' + s.id, '#/new?in=' + esc(s.id), 'Создать подраздел', true)}`}
     <h2 class="label">Нужды</h2>
     ${needs.length ? `<div class="needs">${needs.map(needRow).join('')}</div>` : '<p class="hint">Здесь будут нужды этого раздела: люди, просьбы, события.</p>'}
     <button type="button" class="dashed" data-act="new-need" data-id="${esc(s.id)}">+ Добавить нужду</button>`;
@@ -317,10 +362,10 @@ function vNeed(r){
   if(!n) return notFound();
   const sec = byId('sections', n.section);
   const t = todayISO();
-  const src = n.photo ? photoSrc(n, '800x0') : '';
+  // круглое фото посередине; без фото на его месте ничего нет
   const photo = n.photo
-    ? `<button type="button" class="photo" data-act="view-photo" data-id="${esc(n.id)}" aria-label="Открыть фото крупно">${src ? `<img src="${esc(src)}" alt="">` : ''}</button>`
-    : `<label class="photo-add upload" for="np-input">${ICON.photo}<span>Добавить фото (по желанию)</span><input type="file" id="np-input" accept="image/*,.heic,.heif"></label>`;
+    ? `<button type="button" class="need-photo" data-act="view-photo" data-id="${esc(n.id)}" aria-label="Открыть фото целиком">${imgTag(n.photo_round ? photoSrc(n, 'photo_round') : photoSrc(n, 'photo', '800x0'))}</button>`
+    : '';
   const prayedToday = n.last_prayed_at === t;
   const prayers = S.prayers.filter(p => p.need === n.id).sort((a, b) => String(b.date).localeCompare(String(a.date)) || String(b.created).localeCompare(String(a.created)));
   const files = S.files.filter(f => f.need === n.id).sort((a, b) => String(b.created).localeCompare(String(a.created)));
@@ -328,7 +373,7 @@ function vNeed(r){
   return `<div class="nav-head">${backLink('#/s/' + esc(n.section), pathOf(sec).join(' › ') || 'Раздел')}
       <button type="button" class="icon-btn" data-act="need-menu" data-id="${esc(n.id)}" aria-label="Действия с нуждой: изменить, перенести, удалить" aria-haspopup="menu">${ICON.more}</button></div>
     ${photo}
-    <div class="need-head"><h1>${esc(n.title)}</h1><span>${esc(meta)}</span></div>
+    <div class="need-head${n.photo ? ' center' : ''}"><h1>${esc(n.title)}</h1><span>${esc(meta)}</span></div>
     ${n.description ? `<p class="prose">${esc(n.description)}</p>` : ''}
     <div class="btn-row">
       <button type="button" class="btn ${prayedToday ? 'soft' : 'primary'}" data-act="prayed" data-id="${esc(n.id)}">${prayedToday ? 'Молился сегодня' : 'Помолился'}</button>
@@ -352,9 +397,10 @@ function formInit(r){
   const s = r.name === 'edit' ? byId('sections', r.id) : null;
   const inId = r.q.get('in');
   const inSec = inId ? byId('sections', inId) : null;
+  // ph: фото подраздела после окна обрезки ({file, round, crop, preview} или {remove: true})
   UI.form = s
-    ? {key: location.hash, id: s.id, name: s.name, color: s.color || 'granite', place: s.parent ? 'inside' : 'home', parent: s.parent || ''}
-    : {key: location.hash, id: '', name: '', color: 'granite', place: inSec && !inSec.parent ? 'inside' : 'home', parent: inSec && !inSec.parent ? inSec.id : ''};
+    ? {key: location.hash, id: s.id, name: s.name, color: s.color || 'granite', place: s.parent ? 'inside' : 'home', parent: s.parent || '', ph: null}
+    : {key: location.hash, id: '', name: '', color: 'granite', place: inSec && !inSec.parent ? 'inside' : 'home', parent: inSec && !inSec.parent ? inSec.id : '', ph: null};
   return UI.form;
 }
 function vSectionForm(r){
@@ -368,16 +414,32 @@ function vSectionForm(r){
   if(f.place === 'inside' && !cands.some(s => s.id === f.parent)) f.parent = cands[0].id;
   const sw = Object.entries(COLORS).map(([k, v]) => `<button type="button" class="swatch" data-act="pick-color" data-color="${k}" aria-label="${v.n}" aria-pressed="${k === f.color}"><span><span class="stone" style="background-color:${v.c}" aria-hidden="true"></span></span></button>`).join('');
   const why = hasSubs ? 'У раздела есть подразделы, поэтому он остаётся на главной.' : !cands.length ? 'Внутрь можно положить, когда на главной появится другой раздел.' : '';
-  const parents = f.place === 'inside' ? `<div class="parents" role="radiogroup" aria-label="Внутри какого раздела">${cands.map(s => `<label><input type="radio" name="f-parent" value="${esc(s.id)}"${s.id === f.parent ? ' checked' : ''}><span class="dot" aria-hidden="true"><span class="stone" style="${stoneBg(s)}"></span></span><span>${esc(s.name)}</span></label>`).join('')}</div>` : '';
+  const inside = f.place === 'inside';
+  const parents = inside ? `<div class="parents" role="radiogroup" aria-label="Внутри какого раздела">${cands.map(s => `<label><input type="radio" name="f-parent" value="${esc(s.id)}"${s.id === f.parent ? ' checked' : ''}><span class="dot" aria-hidden="true"><span class="stone" style="${stoneBg(s)}"></span></span><span>${esc(s.name)}</span></label>`).join('')}</div>` : '';
+  // у подраздела вместо цвета камня фото по желанию
+  const src = formPhotoSrc(f), hasPh = !!(src || (f.ph && !f.ph.remove) || (!f.ph && f.id && byId('sections', f.id).photo));
+  const preview = inside
+    ? `<div class="sub-tile pv-sub${hasPh ? ' has-photo' : ''}" id="pv">${WATER}${hasPh ? `<span class="sub-ph" aria-hidden="true">${imgTag(src)}</span>` : ''}<span class="sub-name" id="pv-name">${esc(f.name || 'Название')}</span></div>`
+    : `<div class="preview ink-${c.ink}" id="pv"><span class="stone-shadow" aria-hidden="true"></span><span class="stone" id="pv-stone" style="background-color:${c.c}" aria-hidden="true"></span><span class="pv-name" id="pv-name">${esc(f.name || 'Название')}</span></div>`;
+  const look = inside
+    ? `<div class="field"><span class="flabel">Фото (по желанию)</span><div class="ph-pick"><span class="thumb round">${imgTag(src) || ICON.photo}</span>
+        <div class="acts"><button type="button" class="btn sm" data-act="form-photo">${hasPh ? 'Изменить фото' : 'Поставить фото'}</button>${hasPh ? '<button type="button" class="btn sm ghost danger" data-act="form-photo-remove">Убрать</button>' : ''}</div></div></div>`
+    : `<div class="field"><span class="flabel" id="f-color-l">Цвет камня: ${c.n}</span><div class="swatches">${sw}</div></div>`;
   return `<div class="form-head"><button type="button" class="back" data-act="cancel-form">Отмена</button><h1>${f.id ? 'Изменить раздел' : 'Новый раздел'}</h1><span></span></div>
-    <div class="preview ink-${c.ink}" id="pv"><span class="stone-shadow" aria-hidden="true"></span><span class="stone" id="pv-stone" style="background-color:${c.c}" aria-hidden="true"></span><span class="pv-name" id="pv-name">${esc(f.name || 'Название')}</span></div>
+    ${preview}
     <div class="field"><label for="f-name">Название</label><input id="f-name" type="text" maxlength="100" autocomplete="off" placeholder="Например, Семья" value="${esc(f.name)}"></div>
-    <div class="field"><span class="flabel" id="f-color-l">Цвет камня: ${c.n}</span><div class="swatches">${sw}</div></div>
+    ${look}
     <div class="field"><span class="flabel">Где будет раздел</span>
       <div class="choice"><button type="button" data-act="place" data-place="home" aria-pressed="${f.place === 'home'}">На главной</button><button type="button" data-act="place" data-place="inside" aria-pressed="${f.place === 'inside'}"${canInside ? '' : ' disabled'}>Внутри раздела</button></div>
       ${parents}${why ? `<p class="hint">${why}</p>` : ''}</div>
     <p class="form-err" id="f-err" hidden></p>
     <button type="button" class="btn primary big wide" data-act="save-section">${f.id ? 'Сохранить' : 'Создать раздел'}</button>`;
+}
+// Картинка фото в форме раздела: только что обрезанное или уже сохранённое
+function formPhotoSrc(f){
+  if(f.ph) return f.ph.remove ? '' : f.ph.preview || '';
+  const s = f.id ? byId('sections', f.id) : null;
+  return s && s.photo ? roundSrc(s) : '';
 }
 async function saveSection(btn){
   const f = UI.form; if(!f) return;
@@ -391,10 +453,13 @@ async function saveSection(btn){
       const old = byId('sections', f.id);
       const data = {name: f.name, color: f.color, parent};
       if((old.parent || '') !== parent) data.sort = nextSort(S.sections.filter(s => (s.parent || '') === parent));
+      if(parent && f.ph) Object.assign(data, photoData(f.ph));
       await col('sections').doc(f.id).update(data);
       toast('Раздел сохранён');
     } else {
-      await col('sections').doc().create({name: f.name, color: f.color, parent, sort: nextSort(S.sections.filter(s => (s.parent || '') === parent))});
+      const data = {name: f.name, color: f.color, parent, sort: nextSort(S.sections.filter(s => (s.parent || '') === parent))};
+      if(parent && f.ph && !f.ph.remove) Object.assign(data, photoData(f.ph));
+      await col('sections').doc().create(data);
       toast('Раздел создан');
     }
     UI.form = null;
@@ -436,7 +501,8 @@ function vProfile(){
   const inv = S.invites.slice().sort((a, b) => String(b.created).localeCompare(String(a.created)));
   const usage = S.usage ? `<p class="hint">Фото и файлы занимают ${fsize(S.usage.used || 1)} из ${Math.round(S.usage.quota / MB)} МБ.</p>` : '';
   return `<header class="head"><h1>Профиль</h1></header>
-    <section class="card me-card"><span class="me" aria-hidden="true">${esc(initial(u))}</span><div class="who"><b>${esc(u.name || 'Без имени')}</b><span>${esc(u.email || '')}</span></div>
+    <section class="card me-card"><span class="me" aria-hidden="true">${avatarInner(u)}</span><div class="who"><b>${esc(u.name || 'Без имени')}</b><span>${esc(u.email || '')}</span>
+        <button type="button" class="btn sm" data-act="avatar">${u.avatar ? 'Изменить фото' : 'Поставить фото'}</button></div>
       <button type="button" class="icon-btn" data-act="edit-name" aria-label="Изменить имя">${ICON.pen}</button></section>
     <nav class="links" aria-label="Мои записи">
       <a href="#/verses">${ICON.book}Мои стихи<span class="n">${S.verses.length} из ${MAX_VERSES}</span>${ICON.chev}</a>
@@ -481,22 +547,20 @@ function fileToken(){
 }
 // Фото загружаем один раз и держим в памяти: токен в ссылке живёт недолго
 const PH = new Map();
-function photoSrc(n, thumb){
-  if(!n.photo) return '';
-  const k = n.id + '/' + n.photo + '/' + (thumb || '');
+function photoSrc(rec, field, thumb){
+  const name = rec && rec[field];
+  if(!name) return '';
+  const k = rec.id + '/' + name + '/' + (thumb || '');
   const v = PH.get(k);
   if(v && v !== 'loading' && v !== 'err') return v;
-  if(!v){ PH.set(k, 'loading'); loadPhoto(n, thumb, k); }
+  if(!v){ PH.set(k, 'loading'); photoBlob(rec, field, thumb).then(b => { PH.set(k, URL.createObjectURL(b)); schedule(); }).catch(() => PH.set(k, 'err')); }
   return '';
 }
-async function loadPhoto(n, thumb, k){
-  try {
-    const token = await fileToken();
-    const res = await fetch(pb.files.getURL(n, n.photo, thumb ? {thumb, token} : {token}));
-    if(!res.ok) throw new Error('Фото не загрузилось.');
-    PH.set(k, URL.createObjectURL(await res.blob()));
-    schedule();
-  } catch(e){ PH.set(k, 'err'); }
+async function photoBlob(rec, field, thumb){
+  const token = await fileToken();
+  const res = await fetch(pb.files.getURL(rec, rec[field], thumb ? {thumb, token} : {token}));
+  if(!res.ok) throw new Error('Фото не загрузилось.');
+  return await res.blob();
 }
 // Фото уменьшаем в браузере до 1600 точек по длинной стороне и сохраняем как JPEG
 async function preparePhoto(file){
@@ -506,7 +570,7 @@ async function preparePhoto(file){
   catch(e){
     try { img = await new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = rej; i.src = URL.createObjectURL(file); }); }
     catch(e2){
-      // HEIC открывается не во всех браузерах: тогда сохраняем как есть
+      // HEIC открывается не во всех браузерах: тогда сохраняем как есть (обрезать такое фото нельзя)
       if(['heic','heif'].includes(ext) && file.size <= MAX_PHOTO) return file;
       throw new Error('Не удалось открыть картинку. Выберите фото в формате JPG или PNG.');
     }
@@ -520,11 +584,200 @@ async function preparePhoto(file){
   if(blob.size > MAX_PHOTO) throw new Error('Фото больше 10 МБ.');
   return new File([blob], 'photo.jpg', {type: 'image/jpeg'});
 }
-async function setNeedPhoto(n, file){
-  toast('Сохраняю фото…');
-  try { const ph = await preparePhoto(file); await col('needs').doc(n.id).update({photo: ph}); toast('Фото сохранено'); }
-  catch(e){ toast(errText(e)); }
+
+/* ---------- Окно обрезки фото по кругу: профиль, подраздел, нужда ---------- */
+// Обрезка хранится как центр круга в долях фото (x, y) и увеличение z от 1 до 4.
+// При z = 1 короткая сторона фото ровно вписана в круг.
+const cropDlg = $('#crop'), cropStage = $('#crop-stage'), cropImg = $('#crop-img');
+const CR = {img: null, W: 0, H: 0, cx: .5, cy: .5, z: 1, file: null, raw: false, o: null, resolve: null, seq: 0};
+const ZMAX = 4, ROUND = 400;
+const clampZ = z => Math.min(ZMAX, Math.max(1, +z || 1));
+const PV_TEXT = {sub: 'Так будет в подразделе', need: 'Так будет в списке нужд', avatar: 'Так будет в шапке'};
+function cropPreviewHTML(o){
+  const name = esc(o.name || (o.kind === 'need' ? 'Нужда' : 'Подраздел'));
+  if(o.kind === 'sub') return `<div class="sub-tile has-photo pv-tile">${WATER}<span class="sub-ph pv-photo"><img alt=""></span><span class="sub-name">${name}</span></div>`;
+  if(o.kind === 'need') return `<div class="need-row pv-row"><span class="pic pv-photo"><img alt=""></span><span class="txt"><b>${name}</b><span class="when">${esc(o.when || prayedText(''))}</span></span></div>`;
+  return `<span class="me pv-photo"><img alt=""></span>`;
 }
+// Открывает окно. o: {kind: 'sub'|'need'|'avatar', name, file (новое фото) или rec+field (уже сохранённое), crop, canRemove}.
+// Возвращает {file, round, crop, preview}, {remove: true} или null, если нажали «Отмена».
+function cropPhoto(o){
+  return new Promise(resolve => {
+    if(CR.resolve) CR.resolve(null);
+    Object.assign(CR, {o, resolve, img: null, file: null, raw: false});
+    const box = $('#crop-pv');
+    box.className = 'crop-pv-box k-' + o.kind; box.innerHTML = cropPreviewHTML(o);
+    $('#crop-pv-text').textContent = PV_TEXT[o.kind];
+    const rm = $('#crop-remove');
+    rm.hidden = !o.canRemove; rm.dataset.armed = ''; rm.textContent = 'Убрать фото';
+    if(!cropDlg.open) cropDlg.showModal();
+    if(o.file) cropLoadFile(o.file, o.crop);
+    else cropLoadRec(o.rec, o.field, o.crop);
+  });
+}
+function cropMsg(text){
+  const m = $('#crop-msg');
+  m.textContent = text || ''; m.hidden = !text;
+  cropImg.hidden = !!text;
+  cropDlg.classList.toggle('no-img', !!text);
+}
+async function cropLoadFile(file, crop){
+  const seq = ++CR.seq;
+  CR.img = null; CR.raw = false; cropMsg('Открываю фото…');
+  try {
+    const ph = await preparePhoto(file);
+    if(seq !== CR.seq) return;
+    CR.file = ph;
+    if(ph === file && ph.type !== 'image/jpeg'){
+      // HEIC, который браузер не открывает: сохраним целиком, в круге будет середина
+      CR.raw = true;
+      cropMsg(CR.o.kind === 'avatar' ? 'Это фото не открывается в браузере. Выберите фото в формате JPG или PNG.' : 'Это фото в формате HEIC: в этом браузере его нельзя обрезать. Оно сохранится целиком, в круге будет показана середина.');
+      return;
+    }
+    await cropSetImage(URL.createObjectURL(ph), crop, seq);
+  } catch(e){ if(seq === CR.seq){ CR.file = null; cropMsg(errText(e)); } }
+}
+async function cropLoadRec(rec, field, crop){
+  const seq = ++CR.seq;
+  CR.img = null; CR.raw = false; CR.file = null; cropMsg('Открываю фото…');
+  try { const b = await photoBlob(rec, field); if(seq === CR.seq) await cropSetImage(URL.createObjectURL(b), crop, seq); }
+  catch(e){ if(seq === CR.seq) cropMsg('Это фото не открывается в этом браузере. Выберите другое фото.'); }
+}
+function cropSetImage(url, crop, seq){
+  return new Promise((res, rej) => {
+    const im = new Image();
+    im.onload = () => {
+      if(seq !== CR.seq) return res();
+      const c = crop || {};
+      Object.assign(CR, {img: im, W: im.naturalWidth, H: im.naturalHeight, cx: isFinite(c.x) ? +c.x : .5, cy: isFinite(c.y) ? +c.y : .5, z: clampZ(c.z)});
+      cropImg.src = url;
+      cropDlg.querySelectorAll('.pv-photo img').forEach(i => { i.src = url; });
+      cropMsg('');
+      cropDraw();
+      res();
+    };
+    im.onerror = rej;
+    im.src = url;
+  });
+}
+const cropD = () => cropStage.clientWidth * 0.8; // диаметр круга на экране
+// Фото не может уйти так, чтобы в круге осталась пустота
+function cropClamp(){
+  const k = Math.min(CR.W, CR.H) / CR.z / 2; // половина стороны круга в точках фото
+  CR.cx = Math.min(1 - k / CR.W, Math.max(k / CR.W, CR.cx));
+  CR.cy = Math.min(1 - k / CR.H, Math.max(k / CR.H, CR.cy));
+}
+// Ставит фото так, чтобы центр обрезки оказался в точке center, при масштабе s
+function cropPlace(img, center, s){
+  img.style.width = CR.W + 'px'; img.style.height = CR.H + 'px';
+  img.style.transform = `translate(${center - CR.cx * CR.W * s}px, ${center - CR.cy * CR.H * s}px) scale(${s})`;
+}
+let cropRaf = 0;
+function cropDraw(){
+  if(cropRaf) return;
+  cropRaf = requestAnimationFrame(() => {
+    cropRaf = 0;
+    if(!CR.img) return;
+    cropClamp();
+    const D = cropD(), s = D / Math.min(CR.W, CR.H) * CR.z;
+    cropPlace(cropImg, cropStage.clientWidth / 2, s);
+    $('#crop-z').value = CR.z;
+    cropDlg.querySelectorAll('.pv-photo').forEach(el => { const d = el.clientWidth; cropPlace(el.querySelector('img'), d / 2, s * d / D); });
+  });
+}
+// Пальцы и мышь: один палец двигает, два пальца увеличивают и двигают
+const ptrs = new Map();
+cropStage.addEventListener('pointerdown', e => {
+  if(!CR.img) return;
+  try { cropStage.setPointerCapture(e.pointerId); } catch(err){}
+  ptrs.set(e.pointerId, {x: e.clientX, y: e.clientY});
+});
+cropStage.addEventListener('pointermove', e => {
+  const p = ptrs.get(e.pointerId);
+  if(!p || !CR.img) return;
+  const before = [...ptrs.values()].map(q => ({...q}));
+  p.x = e.clientX; p.y = e.clientY;
+  const after = [...ptrs.values()];
+  const s = cropD() / Math.min(CR.W, CR.H) * CR.z;
+  let dx, dy;
+  if(after.length === 1){ dx = after[0].x - before[0].x; dy = after[0].y - before[0].y; }
+  else {
+    const mid = a => ({x: (a[0].x + a[1].x) / 2, y: (a[0].y + a[1].y) / 2});
+    const dist = a => Math.hypot(a[0].x - a[1].x, a[0].y - a[1].y) || 1;
+    const m0 = mid(before), m1 = mid(after);
+    dx = m1.x - m0.x; dy = m1.y - m0.y;
+    CR.z = clampZ(CR.z * dist(after) / dist(before));
+  }
+  CR.cx -= dx / (s * CR.W); CR.cy -= dy / (s * CR.H);
+  cropDraw();
+});
+const ptrEnd = e => ptrs.delete(e.pointerId);
+cropStage.addEventListener('pointerup', ptrEnd);
+cropStage.addEventListener('pointercancel', ptrEnd);
+cropStage.addEventListener('wheel', e => { if(!CR.img) return; e.preventDefault(); CR.z = clampZ(CR.z * Math.exp(-e.deltaY * 0.0015)); cropDraw(); }, {passive: false});
+$('#crop-z').addEventListener('input', e => { if(!CR.img) return; CR.z = clampZ(e.target.value); cropDraw(); });
+window.addEventListener('resize', () => { if(cropDlg.open) cropDraw(); });
+$('#crop-file').addEventListener('change', e => { const f = e.target.files[0]; e.target.value = ''; if(f) cropLoadFile(f, null); });
+function cropFinish(result){ const r = CR.resolve; CR.resolve = null; CR.seq++; ptrs.clear(); if(cropDlg.open) cropDlg.close(); r && r(result); }
+$('#crop-cancel').addEventListener('click', () => cropFinish(null));
+cropDlg.addEventListener('close', () => { if(CR.resolve) cropFinish(null); });
+$('#crop-remove').addEventListener('click', e => { if(arm(e.currentTarget, 'Точно убрать фото?')) cropFinish({remove: true}); });
+$('#crop-done').addEventListener('click', async e => {
+  if(CR.raw && CR.o.kind !== 'avatar') return cropFinish({file: CR.file, round: null, crop: null, preview: ''});
+  if(!CR.img){ toast('Сначала выберите фото.'); return; }
+  const btn = e.currentTarget; btn.disabled = true;
+  try {
+    cropClamp();
+    const side = Math.min(CR.W, CR.H) / CR.z;
+    const cv = document.createElement('canvas');
+    cv.width = cv.height = ROUND;
+    const g = cv.getContext('2d');
+    g.imageSmoothingQuality = 'high';
+    g.drawImage(CR.img, CR.cx * CR.W - side / 2, CR.cy * CR.H - side / 2, side, side, 0, 0, ROUND, ROUND);
+    const round = await new Promise(res => cv.toBlob(res, 'image/jpeg', 0.88));
+    if(!round) throw new Error('Не удалось обработать фото.');
+    const r4 = x => Math.round(x * 1e4) / 1e4;
+    cropFinish({file: CR.file, round, crop: {x: r4(CR.cx), y: r4(CR.cy), z: r4(CR.z)}, preview: URL.createObjectURL(round)});
+  } catch(err){ toast(errText(err)); }
+  finally { btn.disabled = false; }
+});
+
+// Выбор файла с телефона: скрытое поле, которое кладём в открытое окно (снаружи окна оно не нажимается)
+const picker = document.createElement('input');
+picker.type = 'file'; picker.accept = 'image/*,.heic,.heif'; picker.className = 'picker';
+let pickCb = null;
+picker.addEventListener('change', () => { const f = picker.files[0], cb = pickCb; picker.value = ''; pickCb = null; if(f && cb) cb(f); });
+function pickPhoto(cb){
+  pickCb = cb;
+  (dlg.open ? dlg : document.body).appendChild(picker);
+  picker.click();
+}
+// Фото нужды, подраздела или профиля: если фото уже есть, открываем его в окне обрезки, иначе сначала выбор файла
+function askPhoto(kind, rec){
+  const field = kind === 'avatar' ? 'avatar' : 'photo';
+  const o = {kind, name: kind === 'need' ? rec.title : rec.name, when: kind === 'need' ? prayedText(rec.last_prayed_at) : '', crop: rec.photo_crop, canRemove: !!rec[field]};
+  if(rec[field]) return cropPhoto({...o, rec, field});
+  return new Promise(res => pickPhoto(file => cropPhoto({...o, file}).then(res)));
+}
+// Поля записи из результата окна обрезки: исходник, круг 400×400 и параметры обрезки
+function photoData(ph){
+  if(ph.remove) return {photo: null, photo_round: null, photo_crop: null};
+  const d = {photo_round: ph.round ? new File([ph.round], 'round.jpg', {type: 'image/jpeg'}) : null, photo_crop: ph.crop};
+  if(ph.file) d.photo = ph.file;
+  return d;
+}
+async function savePhoto(kind, rec, ph){
+  if(!ph) return;
+  toast(ph.remove ? 'Убираю фото…' : 'Сохраняю фото…');
+  try {
+    if(kind === 'avatar'){
+      const r = await pb.collection('users').update(rec.id, {avatar: ph.remove ? null : new File([ph.round], 'avatar.jpg', {type: 'image/jpeg'})});
+      pb.authStore.save(pb.authStore.token, r); render();
+    } else await col(kind === 'need' ? 'needs' : 'sections').doc(rec.id).update(photoData(ph));
+    toast(ph.remove ? 'Фото убрано' : 'Фото сохранено');
+  } catch(e){ toast(errText(e)); }
+}
+const photoAction = (kind, rec) => askPhoto(kind, rec).then(ph => savePhoto(kind, rec, ph));
 function fileRow(f){
   const ext = (f.ext || String(f.name || '').split('.').pop() || '').slice(0, 4);
   const meta = [f.size ? fsize(f.size) : '', fmtDay(createdISO(f))].filter(Boolean).join(' · ');
@@ -660,19 +913,19 @@ const dlg = $('#dlg'), form = $('#dlg-form');
 let cur = null;
 function fieldHTML(fd, v){
   const id = 'fld-' + fd.key, val = v ?? '';
-  if(fd.type === 'photo'){
-    return `<div class="field"><span class="flabel">${esc(fd.label)}</span><div class="ph-pick"><span class="thumb" id="ph-thumb">${val ? `<img src="${esc(val)}" alt="">` : ICON.photo}</span>
-      <div class="acts"><label class="btn sm upload" for="${id}">${fd.removable ? 'Заменить' : 'Выбрать фото'}<input type="file" id="${id}" accept="image/*,.heic,.heif"></label>${fd.removable ? '<button type="button" class="btn sm ghost danger" id="ph-remove">Убрать</button>' : ''}</div></div>
+  if(fd.type === 'photo') return `<div class="field"><span class="flabel">${esc(fd.label)}</span><div class="ph-pick" id="ph-pick">${phPickInner(val, fd.has)}</div>
       <p class="hint" style="font-size:12.5px">JPG, PNG, WEBP или HEIC, до 10 МБ.</p></div>`;
-  }
   let input;
   if(fd.type === 'textarea') input = `<textarea id="${id}" rows="${fd.rows || 4}" maxlength="${fd.max || 10000}" placeholder="${esc(fd.placeholder || '')}">${esc(val)}</textarea>`;
   else if(fd.type === 'select') input = `<select id="${id}">${(fd.options || []).map(([k, l]) => `<option value="${esc(k)}"${String(val) === String(k) ? ' selected' : ''}>${esc(l)}</option>`).join('')}</select>`;
   else input = `<input type="${fd.type || 'text'}" id="${id}" value="${esc(val)}" maxlength="${fd.max || 300}" placeholder="${esc(fd.placeholder || '')}" autocomplete="off">`;
   return `<div class="field"><label for="${id}">${esc(fd.label)}</label>${input}</div>`;
 }
+// Фото в форме: круглая миниатюра и кнопки, обрезка в общем окне
+const phPickInner = (src, has) => `<span class="thumb round">${imgTag(src) || ICON.photo}</span>
+  <div class="acts"><button type="button" class="btn sm" id="ph-edit">${has ? 'Изменить фото' : 'Поставить фото'}</button>${has ? '<button type="button" class="btn sm ghost danger" id="ph-remove">Убрать</button>' : ''}</div>`;
 function openForm(o){
-  cur = {...o, saved: false, photoFile: null, photoRemove: false};
+  cur = {...o, saved: false, ph: null};
   form.innerHTML = `<div class="dlg-head"><h2>${esc(o.title)}</h2><button type="button" class="icon-btn" data-close aria-label="Закрыть">×</button></div>
     <div class="dlg-body">${o.text ? `<p class="dlg-text">${esc(o.text)}</p>` : ''}${(o.fields || []).map(fd => fieldHTML(fd, (o.values || {})[fd.key])).join('')}</div>
     <p class="dlg-err" id="dlg-err" hidden></p>
@@ -704,10 +957,11 @@ form.addEventListener('submit', async e => {
 form.addEventListener('click', async e => {
   if(e.target.closest('[data-close]')){ dlg.close(); return; }
   if(e.target.closest('#ph-remove')){
-    cur.photoFile = null; cur.photoRemove = true;
-    $('#ph-thumb').innerHTML = ICON.photo; e.target.closest('#ph-remove').remove();
+    cur.ph = {remove: true};
+    $('#ph-pick').innerHTML = phPickInner('', false);
     return;
   }
+  if(e.target.closest('#ph-edit')){ formPhoto(); return; }
   const del = e.target.closest('#dlg-del');
   if(del){
     if(!arm(del, cur.confirmText || 'Нажмите ещё раз')) return;
@@ -716,16 +970,21 @@ form.addEventListener('click', async e => {
     catch(err){ formErr(errText(err)); del.disabled = false; }
   }
 });
-form.addEventListener('change', e => {
-  const t = e.target;
-  if(t.id === 'fld-photo' && cur){
-    const f = t.files[0]; t.value = '';
-    if(!f) return;
-    cur.photoFile = f; cur.photoRemove = false;
-    const url = URL.createObjectURL(f);
-    $('#ph-thumb').innerHTML = `<img src="${esc(url)}" alt="">`;
-  }
-});
+// «Поставить фото» / «Изменить фото» в форме нужды: окно обрезки поверх формы, сохраняется вместе с формой
+function formPhoto(){
+  const c = cur, rec = c.photoRec, ph = c.ph;
+  const name = (form.querySelector('#fld-title')?.value || '').trim() || (rec && rec.title) || '';
+  const done = res => {
+    if(!res || cur !== c) return;
+    if(res.remove){ c.ph = {remove: true}; $('#ph-pick').innerHTML = phPickInner('', false); return; }
+    c.ph = res;
+    $('#ph-pick').innerHTML = phPickInner(res.preview, true);
+  };
+  const o = {kind: 'need', name, when: prayedText(rec && rec.last_prayed_at), canRemove: true};
+  if(ph && ph.file && !ph.remove) cropPhoto({...o, file: ph.file, crop: ph.crop}).then(done);
+  else if(rec && rec.photo && !(ph && ph.remove)) cropPhoto({...o, rec, field: 'photo', crop: (ph && ph.crop) || rec.photo_crop}).then(done);
+  else pickPhoto(file => cropPhoto({...o, file, canRemove: false}).then(done));
+}
 dlg.addEventListener('close', () => { const c = cur; cur = null; c && c.onClose && c.onClose(c.saved); });
 function arm(btn, text){
   if(btn.dataset.armed === '1') return true;
@@ -766,13 +1025,13 @@ function openNeed(needId, sectionId){
     fields: [
       {key:'title', label:'Название', required:true, placeholder:'Например, здоровье мамы'},
       {key:'description', label:'Описание', type:'textarea', rows:4, max:5000, placeholder:'О чём молиться (по желанию)'},
-      {key:'photo', label:'Фото (по желанию)', type:'photo', removable: !!(n && n.photo)}],
-    values: n ? {...n, photo: n.photo ? photoSrc(n, '120x120') : ''} : {},
+      {key:'photo', label:'Фото (по желанию)', type:'photo', has: !!(n && n.photo)}],
+    values: n ? {...n, photo: n.photo ? roundSrc(n) : ''} : {},
+    photoRec: n,
     submit: n ? 'Сохранить' : 'Добавить',
     async onSave(v, c){
       const data = {title: v.title, description: v.description};
-      if(c.photoFile) data.photo = await preparePhoto(c.photoFile);
-      else if(c.photoRemove) data.photo = null;
+      if(c.ph && !(c.ph.remove && !n)) Object.assign(data, photoData(c.ph));
       if(n) await col('needs').doc(n.id).update(data);
       else await col('needs').doc().create({...data, section: sectionId, answered_at: '', answer_note: '', last_prayed_at: ''});
       toast(n ? 'Сохранено' : 'Нужда добавлена');
@@ -842,21 +1101,99 @@ function openName(){
 function info(title, text){ openForm({title, text, submit: 'Понятно', noCancel: true, async onSave(){}}); }
 
 /* ---------- Отметка дня ---------- */
-async function markDay(){
-  const t = todayISO();
+async function markDay(iso){
+  const t = iso || todayISO();
   if(dayRec(t)) return;
   try { const rec = await pb.collection('prayer_days').create({id: newId(), user: me().id, date: t}); upsert('days', rec); }
   catch(e){ await loadAll(['days']).catch(() => {}); if(!dayRec(t)) throw e; } // отметку уже поставили с другого устройства
 }
+// Поставить или снять отметку: сегодня, вчера или позавчера
+async function toggleDay(iso){
+  const rec = dayRec(iso);
+  if(rec){ await pb.collection('prayer_days').delete(rec.id); removeLocal('days', rec.id); return false; }
+  await markDay(iso); return true;
+}
 async function toggleToday(btn){
   btn.disabled = true;
   try {
-    const rec = dayRec(todayISO());
-    if(rec){ await pb.collection('prayer_days').delete(rec.id); removeLocal('days', rec.id); toast('Отметка снята'); }
-    else { await markDay(); toast('Отмечено'); }
+    toast(await toggleDay(todayISO()) ? 'Отмечено' : 'Отметка снята');
   } catch(e){ toast(errText(e)); }
   finally { btn.disabled = false; }
 }
+
+/* ---------- Календарь молитв: месяц и год ---------- */
+const calDlg = $('#cal');
+const CAL = {view: 'month', y: 0, m: 0};
+const marksIn = prefix => S.days.filter(d => String(d.date).startsWith(prefix)).length;
+function calMonthCells(y, m, mini){
+  const first = new Date(y, m, 1), n = new Date(y, m + 1, 0).getDate(), t = todayISO();
+  let html = '<span class="cd blank"></span>'.repeat(monIndex(first));
+  for(let d = 1; d <= n; d++){
+    const iso = `${y}-${pad(m + 1)}-${pad(d)}`, on = !!dayRec(iso);
+    const cls = `cd${on ? ' on' : ''}${iso === t ? ' today' : ''}${iso > t ? ' future' : ''}`;
+    if(mini) html += `<span class="${cls}"></span>`;
+    else if(canMark(iso)) html += `<button type="button" class="${cls} can" data-cal="toggle" data-date="${iso}" aria-pressed="${on}" aria-label="${d} ${MONF[m]}${on ? ', молился' : ''}. Нажмите, чтобы ${on ? 'снять отметку' : 'отметить'}">${d}</button>`;
+    else html += `<span class="${cls}" aria-label="${d} ${MONF[m]}${on ? ', молился' : ''}">${d}</span>`;
+  }
+  return html;
+}
+// Селектор кнопки календаря, чтобы вернуть на неё фокус после перерисовки
+function calSel(el){
+  const d = el && calDlg.contains(el) ? el.dataset : null;
+  if(!d || !d.cal) return '';
+  return d.date ? `[data-date="${d.date}"]` : d.m ? `[data-cal="open"][data-m="${d.m}"]` : `[data-cal="${d.cal}"]`;
+}
+function renderCal(sel){
+  const {view, y, m} = CAL, month = view === 'month';
+  const thisYear = new Date().getFullYear();
+  const title = month ? `${MONN[m]} ${y}` : String(y);
+  const sum = month ? marksIn(`${y}-${pad(m + 1)}-`) : marksIn(`${y}-`);
+  const body = month
+    ? `<div class="cal-wd" aria-hidden="true">${WDM.map(w => `<span>${w}</span>`).join('')}</div><div class="cal-grid">${calMonthCells(y, m)}</div>`
+    : `<div class="cal-year">${MONN.map((name, i) => { const k = marksIn(`${y}-${pad(i + 1)}-`); return `<button type="button" class="cal-mini" data-cal="open" data-m="${i}" aria-label="${name}: ${k} ${plural(k, DAYS)}"><b>${name}</b><span class="mini-grid" aria-hidden="true">${calMonthCells(y, i, true)}</span></button>`; }).join('')}</div>`;
+  if(sel === undefined) sel = calSel(document.activeElement);
+  calDlg.innerHTML = `<div class="cal-in">
+    <div class="dlg-head"><h2>Мои молитвы</h2><button type="button" class="icon-btn" data-cal="close" aria-label="Закрыть">×</button></div>
+    <div class="cal-body">
+      <div class="choice"><button type="button" data-cal="month" aria-pressed="${month}">Месяц</button><button type="button" data-cal="year" aria-pressed="${!month}">Год</button></div>
+      <div class="cal-nav"><button type="button" class="icon-btn" data-cal="prev" aria-label="${month ? 'Предыдущий месяц' : 'Предыдущий год'}">${ICON.left}</button><b aria-live="polite">${title}</b><button type="button" class="icon-btn" data-cal="next" aria-label="${month ? 'Следующий месяц' : 'Следующий год'}">${ICON.right}</button></div>
+      ${body}
+      <p class="cal-sum">${month ? `В ${MONP[m]}${y !== thisYear ? ' ' + y : ''}` : `В ${y} году`}: ${sum} ${plural(sum, DAYS)}</p>
+      <p class="hint">Отметить можно сегодня, вчера и позавчера.</p>
+    </div></div>`;
+  const el = sel && calDlg.querySelector(sel);
+  if(el) el.focus();
+}
+// Календарь закрывается крестиком, по фону, клавишей Esc и жестом «назад» (для этого шаг в истории)
+function openCalendar(){
+  const d = new Date();
+  Object.assign(CAL, {view: 'month', y: d.getFullYear(), m: d.getMonth()});
+  renderCal();
+  calDlg.showModal();
+  history.pushState({cal: 1}, '');
+}
+calDlg.addEventListener('close', () => { if(history.state && history.state.cal) history.back(); });
+window.addEventListener('popstate', () => { if(calDlg.open) calDlg.close(); });
+calDlg.addEventListener('click', async e => {
+  if(e.target === calDlg){ calDlg.close(); return; }
+  const b = e.target.closest('[data-cal]');
+  if(!b) return;
+  const act = b.dataset.cal, sel = act === 'open' ? '[data-cal="month"]' : calSel(b);
+  if(act === 'close'){ calDlg.close(); return; }
+  if(act === 'month' || act === 'year') CAL.view = act;
+  else if(act === 'open'){ CAL.view = 'month'; CAL.m = +b.dataset.m; }
+  else if(act === 'prev' || act === 'next'){
+    const k = act === 'prev' ? -1 : 1;
+    if(CAL.view === 'year') CAL.y += k;
+    else { const d = new Date(CAL.y, CAL.m + k, 1); CAL.y = d.getFullYear(); CAL.m = d.getMonth(); }
+  } else if(act === 'toggle'){
+    const iso = b.dataset.date;
+    if(!canMark(iso)) return;
+    b.disabled = true;
+    try { await toggleDay(iso); } catch(err){ toast(errText(err)); }
+  }
+  renderCal(sel);
+});
 
 /* ---------- Меню «⋯» ---------- */
 let menu = null;
@@ -886,7 +1223,8 @@ document.addEventListener('keydown', e => {
 });
 function sectionMenu(btn, s){
   openMenu(btn, [
-    {label: 'Изменить: название, цвет, место', run: () => go('#/edit/' + s.id)},
+    {label: s.parent ? 'Изменить: название, фото, место' : 'Изменить: название, цвет, место', run: () => go('#/edit/' + s.id)},
+    ...(s.parent ? [{label: s.photo ? 'Изменить фото' : 'Поставить фото', run: () => photoAction('sub', s)}] : []),
     {label: 'Удалить раздел', danger: true, run: () => {
       const subs = childrenOf(s.id).length, needs = needsIn(s.id).length;
       if(subs || needs){ info('Раздел не пустой', `Удалить можно только пустой раздел. Сейчас в нём ${[subs ? `${subs} ${plural(subs, SUBS)}` : '', needs ? `${needs} ${plural(needs, NEEDS)}` : ''].filter(Boolean).join(' и ')}. Сначала перенесите или удалите их.`); return; }
@@ -898,6 +1236,7 @@ function sectionMenu(btn, s){
 function needMenu(btn, n){
   openMenu(btn, [
     {label: 'Изменить', run: () => openNeed(n.id)},
+    {label: n.photo ? 'Изменить фото' : 'Поставить фото', run: () => photoAction('need', n)},
     {label: 'Перенести в другой раздел', run: () => openMoveNeed(n)},
     {label: 'Удалить нужду', danger: true, run: () => confirmDeleteNeed(n)}
   ]);
@@ -931,6 +1270,21 @@ document.addEventListener('click', async e => {
   const r = route();
   switch(d.act){
     case 'today': toggleToday(a); break;
+    case 'calendar': openCalendar(); break;
+    case 'sub-photo': { const s = byId('sections', d.id); if(s) photoAction('sub', s); break; }
+    case 'avatar': photoAction('avatar', me()); break;
+    case 'form-photo': {
+      const f = UI.form; if(!f) return;
+      f.name = $('#f-name').value;
+      const s = f.id ? byId('sections', f.id) : null;
+      const o = {kind: 'sub', name: f.name.trim(), canRemove: true};
+      const done = res => { if(!res || UI.form !== f) return; f.ph = res; render(true); };
+      if(f.ph && f.ph.file) cropPhoto({...o, file: f.ph.file, crop: f.ph.crop}).then(done);
+      else if(s && s.photo && !(f.ph && f.ph.remove)) cropPhoto({...o, rec: s, field: 'photo', crop: (f.ph && f.ph.crop) || s.photo_crop}).then(done);
+      else pickPhoto(file => cropPhoto({...o, file, canRemove: false}).then(done));
+      break;
+    }
+    case 'form-photo-remove': { const f = UI.form; if(!f) return; f.name = $('#f-name').value; f.ph = {remove: true}; render(true); break; }
     case 'new-verse': openVerse(); break;
     case 'edit-verse': openVerse(d.id); break;
     case 'reorder': UI.reorder = UI.reorder === d.scope ? '' : d.scope; render(); break;
@@ -984,12 +1338,6 @@ document.addEventListener('change', async e => {
   const t = e.target;
   if(t.name === 'p-theme'){ setTheme(t.value); return; }
   if(t.name === 'f-parent' && UI.form){ UI.form.parent = t.value; return; }
-  if(t.id === 'np-input'){
-    const f = t.files[0]; t.value = '';
-    const n = byId('needs', route().id);
-    if(f && n) setNeedPhoto(n, f);
-    return;
-  }
   if(t.id === 'nf-input'){
     const list = [...t.files]; t.value = '';
     const n = byId('needs', route().id); if(!n) return;
@@ -1126,7 +1474,7 @@ async function accountAction(a, d){
 }
 
 let tt = 0;
-function toast(msg){ const el = $('#toast'); const host = viewer.open ? viewer : dlg.open ? dlg : document.body; if(el.parentNode !== host) host.appendChild(el); el.textContent = msg; el.classList.add('show'); clearTimeout(tt); tt = setTimeout(() => el.classList.remove('show'), 2800); }
+function toast(msg){ const el = $('#toast'); const host = [cropDlg, viewer, calDlg, dlg].find(x => x.open) || document.body; if(el.parentNode !== host) host.appendChild(el); el.textContent = msg; el.classList.add('show'); clearTimeout(tt); tt = setTimeout(() => el.classList.remove('show'), 2800); }
 
 boot();
 })();
