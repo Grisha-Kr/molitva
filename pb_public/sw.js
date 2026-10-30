@@ -1,7 +1,9 @@
 // Сервис-воркер: хранит оболочку приложения, чтобы оно быстро открывалось.
-// Данные (/api/) никогда не кэшируются.
-const VERSION = 'molitva-v5';
-const SHELL = ['/', '/index.html', '/app.css?v=5', '/app.js?v=5', '/vendor/pocketbase.umd.js', '/manifest.webmanifest', '/icons/icon-192.png?v=2', '/img/stone.webp', '/img/water.webp', '/img/wave-mask.svg'];
+// Данные (/api/) никогда не кэшируются. Материалы (их список, обложки, аудио и видео) идут
+// только через /api/, поэтому на устройстве от них ничего не остаётся: без интернета
+// вкладка «Материалы» показывает сообщение, что нужно подключение.
+const VERSION = 'molitva-v6';
+const SHELL = ['/', '/index.html', '/app.css?v=6', '/app.js?v=6', '/vendor/pocketbase.umd.js', '/manifest.webmanifest', '/icons/icon-192.png?v=2', '/img/stone.webp', '/img/water.webp', '/img/wave-mask.svg'];
 
 self.addEventListener('install', e => {
   e.waitUntil(caches.open(VERSION).then(c => c.addAll(SHELL)).then(() => self.skipWaiting()));

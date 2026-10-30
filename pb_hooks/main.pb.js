@@ -138,6 +138,19 @@ onRecordUpdateRequest((e) => {
   e.next();
 }, "need_files");
 
+/* ---------- Материалы (правки 2.3) ---------- */
+// Материалы ведёт суперпользователь в панели /_/ (правила коллекции закрыты для обычного API).
+// Проверка работает и для панели: опубликованный материал должен быть готов к показу.
+onRecordCreateRequest((e) => { require(`${__hooks}/lib.js`).checkMaterial(e); e.next(); }, "materials");
+onRecordUpdateRequest((e) => { require(`${__hooks}/lib.js`).checkMaterial(e); e.next(); }, "materials");
+
+// Своя отметка о материале: закреплено, в архиве, когда открыл, где остановился.
+// Переносить отметку на другой материал или на другого человека нельзя.
+onRecordUpdateRequest((e) => {
+  if (!e.hasSuperuserAuth()) require(`${__hooks}/lib.js`).checkMaterialMark(e);
+  e.next();
+}, "material_marks");
+
 // Настройки из окружения:
 // APP_URL — адрес приложения для ссылок в письмах ({APP_URL} в шаблонах), при каждом запуске пишется в настройки;
 // BEHIND_PROXY=1 — приложение стоит за Caddy, настоящий IP посетителя берётся из X-Forwarded-For
@@ -237,7 +250,8 @@ onRecordEnrich((e) => {
 
 // Фильтры и сортировка в общих коллекциях: только безопасные поля (см. checkQuery в lib.js).
 onRecordsListRequest((e) => { require(`${__hooks}/lib.js`).checkQuery(e); e.next(); },
-  "needs", "users", "groups", "group_members", "group_needs", "group_praying", "group_days");
+  "needs", "users", "groups", "group_members", "group_needs", "group_praying", "group_days",
+  "materials", "material_marks");
 
 // Подписки на живые обновления без фильтров: приложению они не нужны, а через них можно подбирать скрытые поля.
 onRealtimeSubscribeRequest((e) => {

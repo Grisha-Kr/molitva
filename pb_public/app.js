@@ -18,12 +18,15 @@ const MB = 1024*1024;
 const MAX_PHOTO = 10*MB, MAX_FILE = 20*MB;
 const FILE_EXT = ['pdf','doc','docx','jpg','jpeg','png','gif','webp','heic','heif'];
 const PBN = {sections:'sections', needs:'needs', files:'need_files', prayers:'prayers', verses:'verses', days:'prayer_days', daily:'daily_verses',
-  groups:'groups', gmembers:'group_members', glinks:'group_needs', gpray:'group_praying', gdays:'group_days', people:'users', shared:'needs'};
+  groups:'groups', gmembers:'group_members', glinks:'group_needs', gpray:'group_praying', gdays:'group_days', people:'users', shared:'needs',
+  materials:'materials', marks:'material_marks'};
 const KEYS = Object.keys(PBN);
 // Группы: needs = свои нужды, shared = чужие нужды из общих групп (только чтение), people = участники общих групп,
 // gpray = отметки «Помолился» у общих нужд (с датой), gdays = дни молитвы участников в группах (ставит сервер)
 const GKEYS = ['groups','gmembers','glinks','gpray','gdays','people','shared'];
 const MAX_MEMBERS = 20, MAX_GROUPS = 10;
+// Материалы (правки 2.3): общий для всех список, ведёт его администратор. marks = свои отметки
+const KINDS = {text:{n:'Текст', ic:'doc'}, audio:{n:'Аудио', ic:'head'}, video:{n:'Видео', ic:'film'}, link:{n:'Ссылка', ic:'link'}};
 
 /* ---------- Значки ---------- */
 const ICON = {
@@ -47,15 +50,22 @@ const ICON = {
   trash: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/></svg>',
   group: '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="9" cy="8" r="3"/><path d="M3 19c0-3 2.7-5 6-5s6 2 6 5"/><circle cx="17" cy="9" r="2.5"/><path d="M16 14c2.8 0 5 1.7 5 4.5"/></svg>',
   eye: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12z"/><circle cx="12" cy="12" r="3"/></svg>',
+  // материалы: раскрытая книга, наушники, плёнка, звено цепи, булавка
+  mats: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 6.5C10.5 5.2 8.4 4.5 5 4.5V18c3.4 0 5.5.7 7 2 1.5-1.3 3.6-2 7-2V4.5c-3.4 0-5.5.7-7 2z"/><path d="M12 6.5V20"/></svg>',
+  doc: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 3h7l5 5v13H6z"/><path d="M13 3v5h5"/><path d="M9 13h6M9 17h4"/></svg>',
+  head: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 14v-2a8 8 0 0 1 16 0v2"/><rect x="2.5" y="13" width="4.5" height="7" rx="2"/><rect x="17" y="13" width="4.5" height="7" rx="2"/></svg>',
+  film: '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="3"/><path d="M10.5 9.3l4.5 2.7-4.5 2.7z"/></svg>',
+  link: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10.5 13.5a3.5 3.5 0 0 0 5 0l3-3a3.5 3.5 0 0 0-5-5l-1 1"/><path d="M13.5 10.5a3.5 3.5 0 0 0-5 0l-3 3a3.5 3.5 0 0 0 5 5l1-1"/></svg>',
+  pin: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 4h6l-1 6 3 3H7l3-3z"/><path d="M12 13v7"/></svg>',
   eyeOff: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12z"/><circle cx="12" cy="12" r="3"/><path d="M4 4l16 16"/></svg>'
 };
 
 /* ---------- Состояние ---------- */
 const S = {sections:[], needs:[], files:[], prayers:[], verses:[], days:[], daily:[], invites:[], usage:null, loaded:false,
-  groups:[], gmembers:[], glinks:[], gpray:[], gdays:[], people:[], shared:[]};
+  groups:[], gmembers:[], glinks:[], gpray:[], gdays:[], people:[], shared:[], materials:[], marks:[]};
 const loadLS = (k, d) => { try { const v = localStorage.getItem('mol_'+k); return v == null ? d : JSON.parse(v); } catch(e){ return d; } };
 const saveLS = (k, v) => { try { localStorage.setItem('mol_'+k, JSON.stringify(v)); } catch(e){} };
-const UI = {reorder:'', filesOpen:false, form:null, hops:0, verseDay:undefined, verseAt:0, join:null};
+const UI = {reorder:'', filesOpen:false, form:null, hops:0, verseDay:undefined, verseAt:0, join:null, archOpen:false};
 const pb = new PocketBase(location.origin);
 pb.autoCancellation(false);
 const me = () => pb.authStore.record || {};
@@ -201,6 +211,7 @@ async function startApp(){
     await loadAll();
     S.loaded = true; $('#notice').hidden = true; render(true);
     if(route().name === 'profile') loadProfileExtras();
+    touchMaterial();
     const join = loadLS('join', '');
     if(join){ saveLS('join', ''); go('#/join/' + encodeURIComponent(join)); }
     subscribeAll().catch(() => {});
@@ -232,14 +243,15 @@ async function checkUpdate(){
 setInterval(checkUpdate, 30*60e3);
 $('#update-btn').addEventListener('click', () => location.reload());
 $('#update-close').addEventListener('click', () => { $('#update-bar').hidden = true; });
-window.addEventListener('online', () => { $('#notice').hidden = true; if(S.loaded) loadAll().catch(() => {}); });
-window.addEventListener('offline', () => showNotice('Нет подключения к интернету. Записи сохранятся, когда связь вернётся.'));
+window.addEventListener('online', () => { $('#notice').hidden = true; schedule(); if(S.loaded) loadAll().catch(() => {}); });
+window.addEventListener('offline', () => { showNotice('Нет подключения к интернету. Записи сохранятся, когда связь вернётся.'); schedule(); });
 let raf = 0;
 function schedule(){ if(raf) return; raf = requestAnimationFrame(() => { raf = 0; render(); }); }
 function showNotice(text){ $('#notice-text').textContent = text; $('#notice').hidden = false; }
 
 /* ---------- Адреса экранов: #/, #/s/ID, #/n/ID, #/new, #/edit/ID, #/verses, #/answers, #/profile,
-   группы: #/groups, #/g/ID, #/gn/ID (общая нужда, ID записи group_needs), #/join/КОД ---------- */
+   группы: #/groups, #/g/ID, #/gn/ID (общая нужда, ID записи group_needs), #/join/КОД,
+   материалы: #/materials, #/m/ID ---------- */
 function route(){
   const h = location.hash.replace(/^#\/?/, '');
   const [path, q] = h.split('?');
@@ -254,7 +266,9 @@ window.addEventListener('hashchange', () => { UI.hops++; UI.reorder = ''; UI.fil
 /* ---------- Отрисовка ---------- */
 function render(force){
   const r = route();
-  const tab = ['profile','verses','answers'].includes(r.name) ? 'profile' : ['groups','g','gn','join'].includes(r.name) || (r.name === 'n' && r.q.get('g')) ? 'groups' : 'diary';
+  const tab = ['profile','verses','answers'].includes(r.name) ? 'profile'
+    : ['materials','m'].includes(r.name) ? 'materials'
+    : ['groups','g','gn','join'].includes(r.name) || (r.name === 'n' && r.q.get('g')) ? 'groups' : 'diary';
   document.querySelectorAll('.tab').forEach(t => t.setAttribute('aria-current', t.dataset.tab === tab ? 'page' : 'false'));
   const m = $('#main');
   if(calDlg.open) renderCal();
@@ -264,7 +278,7 @@ function render(force){
   if(isForm && !force && $('#f-name')) return;
   if(!isForm) UI.form = null;
   const views = {home:vHome, s:vSection, n:vNeed, new:vSectionForm, edit:vSectionForm, verses:vVerses, answers:vAnswers, profile:vProfile,
-    groups:vGroups, g:vGroup, gn:vGroupNeed, join:vJoin};
+    groups:vGroups, g:vGroup, gn:vGroupNeed, join:vJoin, materials:vMaterials, m:vMaterial};
   m.innerHTML = (views[r.name] || vHome)(r);
 }
 const notFound = () => `<div class="card"><p>Запись не найдена: возможно, её уже удалили.</p><a class="btn" href="#/">На главную</a></div>`;
@@ -831,6 +845,149 @@ window.addEventListener('hashchange', () => {
   if(!['groups','g','gn'].includes(route().name) || !S.loaded || Date.now() - gprayAt < 60e3) return;
   gprayAt = Date.now(); loadAll(['gpray','gdays']).catch(() => {});
 });
+
+/* ---------- Материалы ---------- */
+// Список общий для всех, ведёт его администратор. У каждого человека свои отметки (marks):
+// закреплено, в архиве, когда открыл, где остановился в аудио или видео.
+const markOf = id => S.marks.find(m => m.material === id);
+// Свежие сверху; поле sort поднимает материал выше (больше число — выше)
+const matSort = (a, b) => (b.sort ?? 0) - (a.sort ?? 0) || String(b.created).localeCompare(String(a.created));
+const kindOf = m => KINDS[m && m.kind] || KINDS.text;
+const matIcon = m => ICON[kindOf(m).ic];
+const MINS = ['мин','мин','мин'];
+const matMeta = m => [kindOf(m).n, m.duration ? `${m.duration} ${plural(m.duration, MINS)}` : ''].filter(Boolean).join(' · ');
+const isNewMat = m => { const k = markOf(m.id); return !(k && k.opened_at); };
+const safeUrl = u => /^https?:\/\//i.test(String(u || '')) ? String(u) : '';
+// Докуда человек дослушал: доля от длительности (только для аудио и видео)
+function matProgress(m){
+  const k = markOf(m.id);
+  if(!k || !k.position || !m.duration || (m.kind !== 'audio' && m.kind !== 'video')) return 0;
+  return Math.max(0, Math.min(1, k.position / (m.duration * 60)));
+}
+// Отметка создаётся при первом действии с материалом, потом только обновляется
+async function setMark(id, patch){
+  const k = markOf(id);
+  if(k){ upsert('marks', await pb.collection('material_marks').update(k.id, patch)); return; }
+  try { upsert('marks', await pb.collection('material_marks').create({id: newId(), user: me().id, material: id, ...patch})); }
+  catch(e){
+    // отметку уже создали с другого устройства: перечитываем и дописываем
+    await loadAll(['marks']);
+    const k2 = markOf(id);
+    if(!k2) throw e;
+    upsert('marks', await pb.collection('material_marks').update(k2.id, patch));
+  }
+}
+// Текст материала приходит из поля-редактора: оставляем только безопасные теги и адреса
+const MAT_TAGS = {P:1,BR:1,H1:1,H2:1,H3:1,H4:1,H5:1,H6:1,STRONG:1,B:1,EM:1,I:1,U:1,S:1,STRIKE:1,DEL:1,
+  UL:1,OL:1,LI:1,BLOCKQUOTE:1,HR:1,A:1,CODE:1,PRE:1,SPAN:1,DIV:1,FIGURE:1,FIGCAPTION:1,IMG:1,
+  TABLE:1,THEAD:1,TBODY:1,TR:1,TD:1,TH:1};
+function cleanHtml(html){
+  const doc = new DOMParser().parseFromString('<div id="mat-root"></div>', 'text/html');
+  const root = doc.getElementById('mat-root');
+  root.innerHTML = String(html || ''); // DOMParser не выполняет скрипты, ниже они удаляются
+  const walk = el => {
+    for(const ch of [...el.children]){
+      if(!MAT_TAGS[ch.tagName]){ ch.remove(); continue; } // script, iframe, style, object, form и прочее
+      for(const at of [...ch.attributes]){
+        const n = at.name.toLowerCase(), v = String(at.value || '').trim();
+        if(n === 'alt' || n === 'title') continue;
+        if(n === 'href' && ch.tagName === 'A' && /^(https?:|mailto:)/i.test(v)) continue;
+        if(n === 'src' && ch.tagName === 'IMG' && /^data:image\//i.test(v)) continue;
+        ch.removeAttribute(at.name); // in-line стили, onclick, srcset, внешние картинки
+      }
+      if(ch.tagName === 'IMG' && !ch.getAttribute('src')){ ch.remove(); continue; }
+      if(ch.tagName === 'A'){ ch.setAttribute('target', '_blank'); ch.setAttribute('rel', 'noopener noreferrer'); }
+      walk(ch);
+      // ссылка без разрешённого адреса (javascript: и прочее) остаётся обычным текстом
+      if(ch.tagName === 'A' && !ch.getAttribute('href')) ch.replaceWith(...ch.childNodes);
+    }
+  };
+  walk(root);
+  return root.innerHTML;
+}
+
+function matCard(m){
+  const src = m.cover ? photoSrc(m, 'cover', '200x200') : '';
+  const pr = matProgress(m);
+  const pills = [isNewMat(m) ? '<span class="pill new">Новое</span>' : '', !m.published ? '<span class="pill draft">Черновик</span>' : ''].join('');
+  return `<div class="mat-card">
+    <a class="mat-main" href="#/m/${esc(m.id)}">
+      <span class="mat-pic${src ? ' has' : ''}" aria-hidden="true">${src ? imgTag(src) : matIcon(m)}</span>
+      <span class="txt"><b>${esc(m.title)}</b>
+        ${m.summary ? `<span class="desc">${esc(m.summary)}</span>` : ''}
+        <span class="when"><span>${esc(matMeta(m))}</span>${pills}</span></span>
+    </a>
+    <button type="button" class="icon-btn" data-act="mat-menu" data-id="${esc(m.id)}" aria-label="Действия с материалом «${esc(m.title)}»" aria-haspopup="menu">${ICON.more}</button>
+    ${pr ? `<span class="mat-bar" aria-hidden="true"><i style="width:${Math.round(pr * 100)}%"></i></span>` : ''}</div>`;
+}
+
+function vMaterials(){
+  const head = '<header class="head"><h1>Материалы</h1></header>';
+  // ничего из материалов не хранится на устройстве, поэтому без интернета вкладка пустая
+  if(!navigator.onLine) return head + '<section class="card"><p class="empty">Материалы открываются только при подключении к интернету.</p></section>';
+  const all = [...S.materials].sort(matSort);
+  const state = m => { const k = markOf(m.id); return k && k.archived ? 'arch' : k && k.pinned ? 'pin' : 'rest'; };
+  const pin = all.filter(m => state(m) === 'pin'), rest = all.filter(m => state(m) === 'rest'), arch = all.filter(m => state(m) === 'arch');
+  const admin = isAdmin() ? `<section class="card"><h2>Материалы ведёте вы</h2>
+    <p class="hint">Создать или изменить материал: панель администратора, «Collections» (коллекции) → <code>materials</code>. Файл аудио или видео загружается в приложении, на экране материала. Неопубликованные материалы видите только вы.</p>
+    <a class="btn sm" href="/_/#/collections" target="_blank" rel="noopener">Открыть панель</a></section>` : '';
+  if(!all.length) return head + '<section class="card"><p class="empty">Материалов пока нет.</p></section>' + admin;
+  return head +
+    (pin.length ? `<h2 class="label">Закреплённые</h2><div class="mats">${pin.map(matCard).join('')}</div>` : '') +
+    (rest.length ? `${pin.length ? '<h2 class="label">Остальные</h2>' : ''}<div class="mats">${rest.map(matCard).join('')}</div>` : '') +
+    (!pin.length && !rest.length ? '<p class="hint">Все материалы убраны в архив.</p>' : '') +
+    (arch.length ? `<details class="fold" id="arch-fold"${UI.archOpen ? ' open' : ''}><summary><span>Архив · ${arch.length}</span>${ICON.chev}</summary>
+      <div class="fold-body"><div class="mats">${arch.map(matCard).join('')}</div></div></details>` : '') +
+    admin;
+}
+
+function vMaterial(r){
+  const m = byId('materials', r.id);
+  if(!m) return `<div class="nav-head">${backLink('#/materials', 'Материалы')}</div>
+    <div class="card"><p>Материал не найден: возможно, его убрали.</p><a class="btn" href="#/materials">К материалам</a></div>`;
+  const cover = m.cover ? `<div class="mat-cover">${imgTag(photoSrc(m, 'cover', '800x0'))}</div>` : '';
+  const url = safeUrl(m.url);
+  let body = '';
+  if(m.kind === 'text') body = m.body ? `<article class="mat-text">${cleanHtml(m.body)}</article>` : '<p class="hint">Текст ещё не вписан.</p>';
+  else if(m.kind === 'link') body = url
+    ? `<p class="mat-ext">${ICON.link}Внешний сайт</p><a class="btn primary big wide" href="${esc(url)}" target="_blank" rel="noopener noreferrer">Открыть</a>`
+    : '<p class="hint">Адрес ещё не вписан.</p>';
+  else body = matMediaHTML(m);
+  return `<div class="nav-head">${backLink('#/materials', 'Материалы')}
+      <button type="button" class="icon-btn" data-act="mat-menu" data-id="${esc(m.id)}" aria-label="Действия с материалом" aria-haspopup="menu">${ICON.more}</button></div>
+    ${cover}
+    <div class="mat-head"><h1 class="title">${esc(m.title)}</h1><span>${esc(matMeta(m))}${m.published ? '' : ' · черновик'}</span></div>
+    ${m.summary ? `<p class="lead">${esc(m.summary)}</p>` : ''}
+    ${body}`;
+}
+// Аудио и видео: плееры появляются во второй части правок 2.3
+function matMediaHTML(m){
+  return '<p class="hint">Файл ещё не загружен.</p>';
+}
+function matMenu(btn, m){
+  const k = markOf(m.id) || {};
+  openMenu(btn, [
+    {label: k.pinned && !k.archived ? 'Открепить' : 'Закрепить', run: () => matMark(m, {pinned: !(k.pinned && !k.archived), archived: false})},
+    {label: k.archived ? 'Вернуть из архива' : 'В архив', run: () => matMark(m, {archived: !k.archived})}
+  ]);
+}
+async function matMark(m, patch){
+  try { await setMark(m.id, patch); toast(patch.archived ? 'В архиве' : patch.archived === false && !patch.pinned ? 'Возвращено из архива' : patch.pinned ? 'Закреплено' : 'Откреплено'); }
+  catch(e){ toast(errText(e)); }
+}
+// Первое открытие материала: с этого момента пометка «Новое» пропадает
+let openedMat = '';
+function touchMaterial(){
+  const r = route();
+  if(r.name !== 'm' || !S.loaded || openedMat === r.id) return;
+  const m = byId('materials', r.id);
+  if(!m || !isNewMat(m)) return;
+  openedMat = r.id;
+  setMark(m.id, {opened_at: todayISO()}).catch(() => {});
+}
+window.addEventListener('hashchange', touchMaterial);
+// На аудио, видео и обложках контекстное меню (правая кнопка, долгое нажатие) не открывается
+document.addEventListener('contextmenu', e => { if(e.target.closest('.mat-cover, .mat-pic, .mat-media, audio, video')) e.preventDefault(); });
 
 /* ---------- Профиль ---------- */
 function vProfile(){
@@ -1666,6 +1823,7 @@ document.addEventListener('click', async e => {
     case 'new-prayer': openPrayer(null, d.id); break;
     case 'edit-prayer': openPrayer(d.id); break;
     case 'view-photo': { const n = byId('needs', d.id) || byId('shared', d.id); if(n) openPhoto(n); break; }
+    case 'mat-menu': { const m = byId('materials', d.id); if(m) matMenu(a, m); break; }
     case 'new-group': openNewGroup(); break;
     case 'g-menu': { const g = byId('groups', d.id); if(g) groupMenu(a, g); break; }
     case 'g-invite': { const g = byId('groups', d.id); if(g) openInvite(g); break; }
@@ -1737,7 +1895,10 @@ document.addEventListener('change', async e => {
 document.addEventListener('input', e => {
   if(e.target.id === 'f-name' && UI.form){ UI.form.name = e.target.value; $('#pv-name').textContent = e.target.value.trim() || 'Название'; }
 });
-document.addEventListener('toggle', e => { if(e.target.id === 'files-fold') UI.filesOpen = e.target.open; }, true);
+document.addEventListener('toggle', e => {
+  if(e.target.id === 'files-fold') UI.filesOpen = e.target.open;
+  if(e.target.id === 'arch-fold') UI.archOpen = e.target.open;
+}, true);
 
 /* ---------- Вход и регистрация ---------- */
 let authMode = 'login', authInvite = '', authEmail = '', isFirstRun = false;

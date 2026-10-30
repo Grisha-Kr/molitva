@@ -328,9 +328,45 @@ function mailPolish(e, kind) {
   }
 }
 
+/* ---------- Материалы (правки 2.3) ---------- */
+// Опубликованный материал должен быть готов к показу: у текста есть текст, у ссылки адрес,
+// у аудио и видео загружен файл. Пока материал не опубликован, достаточно названия и вида:
+// так можно создать запись в панели, потом загрузить к ней файл в приложении и только затем опубликовать.
+const MAT_KIND_RU = { text: "Текст", audio: "Аудио", video: "Видео", link: "Ссылка" };
+function checkMaterial(e) {
+  const r = e.record;
+  const title = r.getString("title").trim();
+  if (!title) throw new BadRequestError("Введите название материала.");
+  r.set("title", title);
+  r.set("summary", r.getString("summary").trim());
+  const kind = r.getString("kind");
+  if (!MAT_KIND_RU[kind]) throw new BadRequestError("Выберите вид материала: text, audio, video или link.");
+  const url = r.getString("url").trim();
+  if (url && !/^https?:\/\/\S+$/.test(url)) throw new BadRequestError("Адрес ссылки должен начинаться с http:// или https://");
+  r.set("url", url);
+  if (!r.getBool("published")) return;
+  if (kind === "text" && !r.getString("body").trim()) {
+    throw new BadRequestError("У текстового материала пустое поле body: впишите текст или снимите публикацию.");
+  }
+  if (kind === "link" && !url) {
+    throw new BadRequestError("У материала-ссылки пустое поле url: впишите адрес или снимите публикацию.");
+  }
+  if ((kind === "audio" || kind === "video") && !r.getString("media")) {
+    throw new BadRequestError(`${MAT_KIND_RU[kind]}: файл ещё не загружен. Сохраните материал без публикации, загрузите файл в приложении на вкладке «Материалы», потом поставьте «published».`);
+  }
+}
+
+// Отметку можно поставить только себе и только на один материал: при изменении эти поля остаются прежними.
+function checkMaterialMark(e) {
+  const o = e.record.original();
+  e.record.set("user", o.getString("user"));
+  e.record.set("material", o.getString("material"));
+}
+
 module.exports = {
   MB, quotaBytes, usedBytes, checkQuota, checkSectionDepth, checkSection, recordPhoto, checkDayDate, addDefaultVerse, FILE_EXT,
   MAX_MEMBERS, MAX_GROUPS, newGroupCode, groupByCode, isMember, memberGroup, ownGroup, checkGroupLimit, addMember, removeMember, handOverGroups, checkQuery,
   checkGroupDate, markGroupDay, unmarkGroupDay,
   MAIL_PER_DAY, mailAllowed, mailPolish, durationText, alertInfo,
+  MAT_KIND_RU, checkMaterial, checkMaterialMark,
 };
