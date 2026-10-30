@@ -57,15 +57,17 @@ const ICON = {
   film: '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="3"/><path d="M10.5 9.3l4.5 2.7-4.5 2.7z"/></svg>',
   link: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10.5 13.5a3.5 3.5 0 0 0 5 0l3-3a3.5 3.5 0 0 0-5-5l-1 1"/><path d="M13.5 10.5a3.5 3.5 0 0 0-5 0l-3 3a3.5 3.5 0 0 0 5 5l1-1"/></svg>',
   pin: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 4h6l-1 6 3 3H7l3-3z"/><path d="M12 13v7"/></svg>',
+  play: '<svg viewBox="0 0 24 24" aria-hidden="true"><path class="fill" d="M8 5.5l11 6.5-11 6.5z"/></svg>',
+  pause: '<svg viewBox="0 0 24 24" aria-hidden="true"><path class="fill" d="M7 5h3.5v14H7zM13.5 5H17v14h-3.5z"/></svg>',
   eyeOff: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12z"/><circle cx="12" cy="12" r="3"/><path d="M4 4l16 16"/></svg>'
 };
 
 /* ---------- Состояние ---------- */
 const S = {sections:[], needs:[], files:[], prayers:[], verses:[], days:[], daily:[], invites:[], usage:null, loaded:false,
-  groups:[], gmembers:[], glinks:[], gpray:[], gdays:[], people:[], shared:[], materials:[], marks:[]};
+  groups:[], gmembers:[], glinks:[], gpray:[], gdays:[], people:[], shared:[], materials:[], marks:[], mediaUsage:null};
 const loadLS = (k, d) => { try { const v = localStorage.getItem('mol_'+k); return v == null ? d : JSON.parse(v); } catch(e){ return d; } };
 const saveLS = (k, v) => { try { localStorage.setItem('mol_'+k, JSON.stringify(v)); } catch(e){} };
-const UI = {reorder:'', filesOpen:false, form:null, hops:0, verseDay:undefined, verseAt:0, join:null, archOpen:false};
+const UI = {reorder:'', filesOpen:false, form:null, hops:0, verseDay:undefined, verseAt:0, join:null, archOpen:false, up:0};
 const pb = new PocketBase(location.origin);
 pb.autoCancellation(false);
 const me = () => pb.authStore.record || {};
@@ -119,7 +121,9 @@ function prayedText(iso){
   if(k === 1) return 'Молился вчера';
   return `Молился ${k} ${plural(k, DAYS)} назад`;
 }
-const fsize = b => b < MB ? Math.max(1, Math.round(b/1024)) + ' КБ' : (b/MB).toFixed(1).replace('.', ',') + ' МБ';
+const fsize = b => b < MB ? Math.max(1, Math.round(b/1024)) + ' КБ'
+  : b < 1024*MB ? (b/MB).toFixed(1).replace('.', ',') + ' МБ'
+  : (b/1024/MB).toFixed(1).replace('.', ',') + ' ГБ';
 
 /* ---------- Доступ к данным ---------- */
 const byId = (key, id) => S[key].find(x => x.id === id);
@@ -220,10 +224,11 @@ async function startApp(){
   }
 }
 document.addEventListener('visibilitychange', () => {
-  if(document.visibilityState !== 'visible') return;
+  if(document.visibilityState !== 'visible'){ savePos(true); return; } // ушли с экрана: запоминаем место в плеере
   checkUpdate();
   if(S.loaded && pb.authStore.isValid) loadAll().catch(() => {});
 });
+window.addEventListener('pagehide', () => savePos(true));
 
 /* ---------- Проверка новой версии ---------- */
 // Сравниваем ?v= у app.js и app.css в открытой странице и в свежем index.html с сервера
@@ -276,10 +281,13 @@ function render(force){
   const isForm = r.name === 'new' || r.name === 'edit';
   // форма раздела не перерисовывается от живых обновлений, чтобы не сбить ввод
   if(isForm && !force && $('#f-name')) return;
+  // экран материала тоже: иначе остановится плеер или прервётся загрузка файла
+  if(r.name === 'm' && !force && (UI.up || $('#main [data-player]'))) return;
   if(!isForm) UI.form = null;
   const views = {home:vHome, s:vSection, n:vNeed, new:vSectionForm, edit:vSectionForm, verses:vVerses, answers:vAnswers, profile:vProfile,
     groups:vGroups, g:vGroup, gn:vGroupNeed, join:vJoin, materials:vMaterials, m:vMaterial};
   m.innerHTML = (views[r.name] || vHome)(r);
+  if(r.name === 'm'){ setupPlayer(); if(isAdmin() && !S.mediaUsage) loadMediaUsage(); } else if(PL.id) stopPlayer();
 }
 const notFound = () => `<div class="card"><p>Запись не найдена: возможно, её уже удалили.</p><a class="btn" href="#/">На главную</a></div>`;
 const backLink = (href, text) => `<a class="back" href="${href}">${ICON.back}<span>${esc(text)}</span></a>`;
@@ -960,9 +968,216 @@ function vMaterial(r){
     ${m.summary ? `<p class="lead">${esc(m.summary)}</p>` : ''}
     ${body}`;
 }
-// Аудио и видео: плееры появляются во второй части правок 2.3
+/* ---------- Аудио и видео ---------- */
+// Файл лежит на сервере отдельно от базы и отдаётся по ссылке, которая живёт 2 часа
+// и работает только в том браузере, где выполнен вход (сервер ставит к ней куку).
+const RATES = [1, 1.25, 1.5, 2];
+const PL = {id:'', el:null, box:null, at:0, last:-999, tries:0, want:null, resume:false, seeking:false};
+const mmss = s => { s = Math.max(0, Math.round(s || 0)); return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0'); };
+
 function matMediaHTML(m){
-  return '<p class="hint">Файл ещё не загружен.</p>';
+  const admin = isAdmin() ? matAdminHTML(m) : '';
+  if(!m.media) return '<p class="hint">Файл ещё не загружен.</p>' + admin;
+  const restart = '<button type="button" class="btn sm" data-act="pl-restart">Сначала</button>';
+  if(m.kind === 'video') return `<div class="mat-media" data-player="${esc(m.id)}">
+      <video class="mat-video" playsinline controls preload="metadata" controlslist="nodownload noremoteplayback" disablepictureinpicture></video>
+      <p class="pl-msg" hidden></p><div class="pl-foot">${restart}</div></div>` + admin;
+  return `<section class="card mat-media mat-player" data-player="${esc(m.id)}">
+      <audio preload="metadata"></audio>
+      <div class="pl-main">
+        <button type="button" class="btn sm pl-skip" data-act="pl-skip" data-k="-15" aria-label="Назад на 15 секунд">−15 с</button>
+        <button type="button" class="pl-play" data-act="pl-play" aria-label="Играть">${ICON.play}</button>
+        <button type="button" class="btn sm pl-skip" data-act="pl-skip" data-k="15" aria-label="Вперёд на 15 секунд">+15 с</button>
+      </div>
+      <input type="range" class="pl-seek" min="0" max="1" value="0" step="1" aria-label="Перемотка">
+      <div class="pl-time"><span class="now">0:00</span><span class="dur">—</span></div>
+      <div class="pl-rates" role="group" aria-label="Скорость">${RATES.map(r => `<button type="button" data-act="pl-rate" data-r="${r}" aria-pressed="${r === 1}">${String(r).replace('.', ',')}×</button>`).join('')}</div>
+      <p class="pl-msg" hidden></p><div class="pl-foot">${restart}</div>
+    </section>` + admin;
+}
+function plMsg(text){
+  const p = PL.box && PL.box.querySelector('.pl-msg');
+  if(p){ p.textContent = text; p.hidden = !text; }
+}
+// Экран материала открыт: включаем плеер. Другой экран: выключаем и запоминаем место.
+function setupPlayer(){
+  const box = $('#main [data-player]');
+  if(!box){ if(PL.id) stopPlayer(); return; }
+  if(PL.id === box.dataset.player && PL.el && PL.el.isConnected) return;
+  stopPlayer();
+  PL.id = box.dataset.player; PL.box = box; PL.el = box.querySelector('audio, video');
+  const el = PL.el, m = byId('materials', PL.id);
+  el.addEventListener('loadedmetadata', () => { plStart(); plTick(); });
+  el.addEventListener('timeupdate', () => { plTick(); savePos(false); });
+  el.addEventListener('play', plBtn);
+  el.addEventListener('pause', () => { plBtn(); savePos(true); });
+  el.addEventListener('ended', () => { plBtn(); savePos(true); });
+  el.addEventListener('error', plError);
+  plBtn();
+  plLink();
+  if(m) plSession(m, el);
+}
+function stopPlayer(){
+  if(PL.el){
+    savePos(true);
+    try { PL.el.pause(); PL.el.removeAttribute('src'); PL.el.load(); } catch(e){}
+  }
+  if('mediaSession' in navigator){ try { navigator.mediaSession.metadata = null; } catch(e){} }
+  Object.assign(PL, {id:'', el:null, box:null, at:0, last:-999, tries:0, want:null, resume:false, seeking:false});
+}
+async function plLink(){
+  const el = PL.el, id = PL.id;
+  plMsg('');
+  try {
+    const r = await pb.send('/api/molitva/materials/' + id + '/media-link', {});
+    if(PL.el !== el) return;
+    el.src = r.url;
+    el.load();
+  } catch(e){ if(PL.el === el) plMsg(errText(e)); }
+}
+// Ссылка устарела (прошло больше двух часов) или связь прервалась: просим новую и продолжаем с того же места
+function plError(){
+  const el = PL.el;
+  if(!el || !el.getAttribute('src')) return;
+  if(PL.tries >= 2){ plMsg('Файл не открылся. Проверьте интернет и откройте материал заново.'); return; }
+  PL.tries++;
+  PL.want = PL.at || (markOf(PL.id) || {}).position || 0;
+  PL.resume = !el.paused;
+  plLink();
+}
+// Продолжаем с места, где человек остановился
+function plStart(){
+  const el = PL.el;
+  const want = PL.want != null ? PL.want : ((markOf(PL.id) || {}).position || 0);
+  PL.want = null;
+  if(want > 5 && el.duration && want < el.duration - 5){ try { el.currentTime = want; } catch(e){} }
+  PL.last = Math.floor(el.currentTime || 0);
+  if(PL.resume){ PL.resume = false; el.play().catch(() => {}); }
+}
+function plTick(){
+  const el = PL.el, box = PL.box;
+  if(!el || !box) return;
+  PL.at = el.currentTime || 0;
+  const d = isFinite(el.duration) ? el.duration : 0;
+  const seek = box.querySelector('.pl-seek');
+  if(seek && !PL.seeking){ seek.max = Math.max(1, Math.floor(d)); seek.value = Math.floor(PL.at); }
+  const now = box.querySelector('.pl-time .now'), dur = box.querySelector('.pl-time .dur');
+  if(now) now.textContent = mmss(PL.at);
+  if(dur) dur.textContent = d ? mmss(d) : '—';
+}
+function plBtn(){
+  const b = PL.box && PL.box.querySelector('.pl-play');
+  if(!b || !PL.el) return;
+  const on = !PL.el.paused && !PL.el.ended;
+  b.innerHTML = on ? ICON.pause : ICON.play;
+  b.setAttribute('aria-label', on ? 'Пауза' : 'Играть');
+}
+function plSkip(k){
+  const el = PL.el;
+  if(!el || !el.duration) return;
+  el.currentTime = Math.max(0, Math.min(el.duration - 0.5, (el.currentTime || 0) + k));
+  plTick(); savePos(true);
+}
+// Место остановки сохраняем раз в 15 секунд, при паузе и при уходе с экрана.
+// Дослушал до конца: в следующий раз начнём сначала.
+function savePos(force){
+  const el = PL.el, id = PL.id;
+  if(!el || !id || !el.duration || !isFinite(el.duration)) return;
+  const t = Math.floor(el.currentTime || 0);
+  if(!force && Math.abs(t - PL.last) < 15) return;
+  PL.last = t;
+  setMark(id, {position: el.duration - t < 15 ? 0 : t}).catch(() => {});
+}
+// Название и кнопки на экране блокировки телефона, если браузер это умеет
+function plSession(m, el){
+  if(!('mediaSession' in navigator)) return;
+  try {
+    const art = m.cover ? photoSrc(m, 'cover', '200x200') : '';
+    navigator.mediaSession.metadata = new MediaMetadata({title: m.title, artist: 'Молитвенный дневник',
+      artwork: art ? [{src: art, sizes: '200x200', type: 'image/jpeg'}] : []});
+    const set = (k, fn) => { try { navigator.mediaSession.setActionHandler(k, fn); } catch(e){} };
+    set('play', () => el.play().catch(() => {}));
+    set('pause', () => el.pause());
+    set('seekbackward', () => plSkip(-15));
+    set('seekforward', () => plSkip(15));
+    set('seekto', d => { if(d && d.seekTime != null){ el.currentTime = d.seekTime; plTick(); } });
+  } catch(e){}
+}
+
+/* ---------- Загрузка файла материала (только администратор) ---------- */
+function matAdminHTML(m){
+  const about = m.kind === 'video' ? 'Видео MP4 (H.264 и AAC), до 1 ГБ.' : 'Аудио MP3 или M4A, до 100 МБ.';
+  const accept = m.kind === 'video' ? 'video/mp4,.mp4' : 'audio/mpeg,audio/mp4,.mp3,.m4a';
+  const have = m.media ? `<p class="hint">Загружен файл ${fsize(m.media_size || 1)}${m.duration ? ', ' + m.duration + ' ' + plural(m.duration, MINS) : ''}.</p>` : '';
+  return `<section class="card mat-admin"><h2>Файл материала</h2>
+    <p class="hint">${about} Файл лежит на сервере отдельно от базы, поэтому в ежедневную копию базы он не попадает. Загружайте с устойчивого интернета: большой файл идёт несколько минут.</p>
+    ${have}
+    <div class="up-row">
+      <label class="btn sm upload" for="mat-file">${m.media ? 'Заменить файл' : 'Загрузить файл'}<input type="file" id="mat-file" accept="${accept}"></label>
+      ${m.media && !m.published ? '<button type="button" class="btn sm ghost danger" data-act="mat-file-del" data-id="' + esc(m.id) + '">Убрать файл</button>' : ''}
+    </div>
+    <div class="up-bar" id="up-bar" hidden><i></i></div>
+    <p class="hint" id="up-space">${esc(S.mediaUsage ? mediaSpaceText(S.mediaUsage) : '')}</p></section>`;
+}
+const mediaSpaceText = u => `Материалы занимают ${fsize(u.used || 1)}, на диске сервера свободно ${fsize(u.free)}.`;
+async function loadMediaUsage(){
+  if(!isAdmin()) return;
+  try { S.mediaUsage = await pb.send('/api/molitva/media-usage', {}); } catch(e){ return; }
+  const p = $('#up-space');
+  if(p) p.textContent = mediaSpaceText(S.mediaUsage);
+}
+// Длительность берём из самого файла, если она не вписана
+function fileMinutes(file){
+  return new Promise(res => {
+    const el = document.createElement(file.type.indexOf('video') === 0 ? 'video' : 'audio');
+    const url = URL.createObjectURL(file);
+    const done = v => { URL.revokeObjectURL(url); res(v); };
+    el.preload = 'metadata';
+    el.onloadedmetadata = () => done(isFinite(el.duration) && el.duration > 0 ? Math.max(1, Math.round(el.duration / 60)) : 0);
+    el.onerror = () => done(0);
+    setTimeout(() => done(0), 15000);
+    el.src = url;
+  });
+}
+function uploadMedia(id, file, minutes, onProgress){
+  return new Promise((res, rej) => {
+    const fd = new FormData();
+    fd.append('file', file);
+    if(minutes) fd.append('duration', String(minutes));
+    const x = new XMLHttpRequest();
+    x.open('POST', '/api/molitva/materials/' + encodeURIComponent(id) + '/media');
+    x.setRequestHeader('Authorization', pb.authStore.token);
+    x.upload.onprogress = e => { if(e.lengthComputable) onProgress(e.loaded / e.total); };
+    x.onload = () => {
+      let d = {};
+      try { d = JSON.parse(x.responseText); } catch(e){}
+      if(x.status >= 200 && x.status < 300) res(d);
+      else rej(new Error(d.message || (x.status === 413 ? 'Файл слишком большой.' : 'Файл не загрузился. Попробуйте ещё раз.')));
+    };
+    x.onerror = () => rej(new Error('Связь прервалась. Попробуйте ещё раз с устойчивого интернета.'));
+    x.send(fd);
+  });
+}
+async function pickMedia(file){
+  const m = byId('materials', route().id);
+  if(!m) return;
+  const bar = $('#up-bar'), fill = bar && bar.querySelector('i');
+  UI.up = 1;
+  if(bar){ bar.hidden = false; fill.style.width = '2%'; }
+  toast('Определяю длительность…');
+  try {
+    const minutes = m.duration ? 0 : await fileMinutes(file);
+    toast('Загружаю файл…');
+    await uploadMedia(m.id, file, minutes, p => { if(fill) fill.style.width = Math.max(2, Math.round(p * 100)) + '%'; });
+    await loadAll(['materials']);
+    toast('Файл загружен');
+  } catch(e){ toast(errText(e)); }
+  finally {
+    UI.up = 0;
+    if(bar) bar.hidden = true;
+    render(true);
+    loadMediaUsage();
+  }
 }
 function matMenu(btn, m){
   const k = markOf(m.id) || {};
@@ -1824,6 +2039,25 @@ document.addEventListener('click', async e => {
     case 'edit-prayer': openPrayer(d.id); break;
     case 'view-photo': { const n = byId('needs', d.id) || byId('shared', d.id); if(n) openPhoto(n); break; }
     case 'mat-menu': { const m = byId('materials', d.id); if(m) matMenu(a, m); break; }
+    case 'pl-play': { const el = PL.el; if(!el) return; el.paused ? el.play().catch(err => plMsg(errText(err))) : el.pause(); break; }
+    case 'pl-skip': plSkip(+d.k); break;
+    case 'pl-restart': { const el = PL.el; if(!el) return; el.currentTime = 0; plTick(); savePos(true); break; }
+    case 'pl-rate': {
+      const el = PL.el; if(!el) return;
+      el.playbackRate = +d.r;
+      document.querySelectorAll('.pl-rates button').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.r === d.r)));
+      break;
+    }
+    case 'mat-file-del': {
+      const m = byId('materials', d.id); if(!m) return;
+      openForm({title: 'Убрать файл?', text: `Файл материала «${m.title}» удалится с сервера. Вернуть его можно только новой загрузкой.`, submit: 'Убрать', danger: true,
+        async onSave(){
+          await pb.send('/api/molitva/materials/' + m.id + '/media', {method: 'DELETE'});
+          await loadAll(['materials']);
+          render(true); loadMediaUsage(); toast('Файл убран');
+        }});
+      break;
+    }
     case 'new-group': openNewGroup(); break;
     case 'g-menu': { const g = byId('groups', d.id); if(g) groupMenu(a, g); break; }
     case 'g-invite': { const g = byId('groups', d.id); if(g) openInvite(g); break; }
@@ -1881,6 +2115,17 @@ document.addEventListener('change', async e => {
   const t = e.target;
   if(t.name === 'p-theme'){ setTheme(t.value); return; }
   if(t.name === 'f-parent' && UI.form){ UI.form.parent = t.value; return; }
+  if(t.id === 'mat-file'){
+    const file = t.files[0]; t.value = '';
+    if(file) pickMedia(file);
+    return;
+  }
+  // ползунок перемотки: ведём пальцем без перескоков, переходим при отпускании
+  if(t.classList && t.classList.contains('pl-seek')){
+    PL.seeking = false;
+    if(PL.el && PL.el.duration){ PL.el.currentTime = Math.min(+t.value, PL.el.duration - 0.2); plTick(); savePos(true); }
+    return;
+  }
   if(t.id === 'nf-input'){
     const list = [...t.files]; t.value = '';
     const n = byId('needs', route().id); if(!n) return;
@@ -1894,6 +2139,11 @@ document.addEventListener('change', async e => {
 });
 document.addEventListener('input', e => {
   if(e.target.id === 'f-name' && UI.form){ UI.form.name = e.target.value; $('#pv-name').textContent = e.target.value.trim() || 'Название'; }
+  if(e.target.classList && e.target.classList.contains('pl-seek')){
+    PL.seeking = true;
+    const now = PL.box && PL.box.querySelector('.pl-time .now');
+    if(now) now.textContent = mmss(+e.target.value);
+  }
 });
 document.addEventListener('toggle', e => {
   if(e.target.id === 'files-fold') UI.filesOpen = e.target.open;

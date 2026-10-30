@@ -105,8 +105,14 @@ OWNER_NAME=$OWNER
 CONTACT_EMAIL=$CONTACT
 USER_QUOTA_MB=250
 BEHIND_PROXY=1
+MEDIA_DIR=$APP_DIR/media
+MEDIA_MIN_FREE_GB=5
 EOF
 fi
+
+# Папка для файлов материалов (аудио и видео). Она лежит рядом с pb_data, а не внутри,
+# поэтому ежедневная копия базы не разрастается на гигабайты: эти файлы в неё не попадают.
+mkdir -p "$APP_DIR/media"
 chmod 600 "$APP_DIR/$APP.env"
 chown -R "$APP:$APP" "$APP_DIR"
 

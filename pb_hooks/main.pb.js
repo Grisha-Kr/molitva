@@ -142,7 +142,19 @@ onRecordUpdateRequest((e) => {
 // Материалы ведёт суперпользователь в панели /_/ (правила коллекции закрыты для обычного API).
 // Проверка работает и для панели: опубликованный материал должен быть готов к показу.
 onRecordCreateRequest((e) => { require(`${__hooks}/lib.js`).checkMaterial(e); e.next(); }, "materials");
-onRecordUpdateRequest((e) => { require(`${__hooks}/lib.js`).checkMaterial(e); e.next(); }, "materials");
+onRecordUpdateRequest((e) => {
+  const lib = require(`${__hooks}/lib.js`);
+  lib.checkMaterial(e);
+  // вид поменяли с аудио или видео на текст или ссылку: файл больше не нужен и не должен лежать на диске впустую
+  const was = e.record.original().getString("media");
+  const kind = e.record.getString("kind");
+  if (was && kind !== "audio" && kind !== "video") {
+    e.record.set("media", "");
+    e.record.set("media_size", 0);
+  }
+  e.next();
+  if (was && !e.record.getString("media")) lib.deleteMedia(was);
+}, "materials");
 
 // Своя отметка о материале: закреплено, в архиве, когда открыл, где остановился.
 // Переносить отметку на другой материал или на другого человека нельзя.
@@ -150,6 +162,102 @@ onRecordUpdateRequest((e) => {
   if (!e.hasSuperuserAuth()) require(`${__hooks}/lib.js`).checkMaterialMark(e);
   e.next();
 }, "material_marks");
+
+// Материал удалили: его файл аудио или видео убирается из папки материалов.
+onRecordAfterDeleteSuccess((e) => {
+  e.next();
+  try { require(`${__hooks}/lib.js`).deleteMedia(e.record.getString("media")); }
+  catch (err) { $app.logger().error("Не удалось удалить файл материала", "material", e.record.id, "error", String(err)); }
+}, "materials");
+
+// Ссылка на файл аудио или видео: живёт 2 часа и работает только вместе с кукой,
+// которую этот же ответ ставит вошедшему человеку (см. setMediaCookie в lib.js).
+routerAdd("GET", "/api/molitva/materials/{id}/media-link", (e) => {
+  const lib = require(`${__hooks}/lib.js`);
+  const m = lib.visibleMaterial(e.auth.id, e.request.pathValue("id"));
+  if (!m.getString("media")) throw new NotFoundError("У этого материала ещё нет файла.");
+  return e.json(200, { url: lib.mediaLink(e, m.id, e.auth.id), ttl: lib.MEDIA_TTL });
+}, $apis.requireAuth("users"));
+
+// Отдача файла. Вход проверяется двумя способами сразу: подписанный ключ в адресе и кука.
+// Файл отдаётся из папки вне pb_data, с поддержкой перемотки (Range), без кэширования и без скачивания.
+routerAdd("GET", "/api/molitva/media/{id}", (e) => {
+  const lib = require(`${__hooks}/lib.js`);
+  const id = e.request.pathValue("id");
+  const userId = lib.mediaUser(e, id);
+  const m = lib.visibleMaterial(userId, id);
+  const name = m.getString("media");
+  if (!name) throw new NotFoundError("У этого материала ещё нет файла.");
+  e.response.header().set("Cache-Control", "private, no-store");
+  e.response.header().set("Content-Disposition", "inline");
+  e.response.header().set("X-Content-Type-Options", "nosniff");
+  return e.fileFS($os.dirFS(lib.mediaDir()), name);
+});
+
+// Загрузка файла аудио или видео: только администратор приложения.
+// Файл идёт через сервер потоком в папку материалов, память не расходуется.
+routerAdd("POST", "/api/molitva/materials/{id}/media", (e) => {
+  const lib = require(`${__hooks}/lib.js`);
+  lib.requireAdmin(e);
+  let m = null;
+  try { m = $app.findRecordById("materials", e.request.pathValue("id")); } catch (_) {}
+  if (!m) throw new NotFoundError("Материал не найден.");
+  const kind = m.getString("kind");
+  const rules = lib.MEDIA[kind];
+  if (!rules) throw new BadRequestError("Файл можно загрузить только к материалу вида audio или video.");
+
+  const files = e.findUploadedFiles("file");
+  if (!files.length) throw new BadRequestError("Файл не выбран.");
+  const file = files[0];
+  const ext = String(file.originalName || "").split(".").pop().toLowerCase();
+  if (rules.ext.indexOf(ext) < 0) throw new BadRequestError(`${rules.ru}: подходит ${rules.about}. Файл .${ext || "?"} не подходит.`);
+  if (file.size > rules.max) throw new BadRequestError(`${rules.ru}: файл больше, чем можно (${rules.about}).`);
+  const free = lib.freeBytes(), min = lib.minFreeBytes();
+  if (free - file.size < min) {
+    const gb = (x) => (x / (1024 * 1024 * 1024)).toFixed(1).replace(".", ",");
+    throw new BadRequestError(`На диске сервера мало места: свободно ${gb(free)} ГБ, а нужно оставить не меньше ${gb(min)} ГБ. Удалите ненужные материалы или попросите увеличить диск.`);
+  }
+
+  const old = m.getString("media");
+  const name = lib.mediaName(m.id, ext);
+  const fs = lib.mediaFs();
+  try { fs.uploadFile(file, name); } finally { fs.close(); }
+
+  const dur = parseInt((e.requestInfo().body || {}).duration, 10);
+  m.set("media", name);
+  m.set("media_size", file.size);
+  if (!m.getInt("duration") && dur > 0) m.set("duration", dur);
+  try { $app.save(m); } catch (err) { lib.deleteMedia(name); throw err; }
+  lib.deleteMedia(old); // прежний файл больше не нужен
+
+  return e.json(200, { media: name, size: file.size, duration: m.getInt("duration") });
+}, $apis.requireAuth("users"), $apis.bodyLimit(1100 * 1024 * 1024));
+
+// Убрать файл у материала (только администратор). У опубликованного материала сначала снимают публикацию.
+routerAdd("DELETE", "/api/molitva/materials/{id}/media", (e) => {
+  const lib = require(`${__hooks}/lib.js`);
+  lib.requireAdmin(e);
+  let m = null;
+  try { m = $app.findRecordById("materials", e.request.pathValue("id")); } catch (_) {}
+  if (!m) throw new NotFoundError("Материал не найден.");
+  if (m.getBool("published")) throw new BadRequestError("Материал опубликован. Сначала снимите публикацию в панели, потом убирайте файл.");
+  const name = m.getString("media");
+  m.set("media", "");
+  m.set("media_size", 0);
+  $app.save(m);
+  lib.deleteMedia(name);
+  return e.json(200, { ok: true });
+}, $apis.requireAuth("users"));
+
+// Сколько места занимают материалы и сколько свободно на диске (для формы загрузки).
+routerAdd("GET", "/api/molitva/media-usage", (e) => {
+  const lib = require(`${__hooks}/lib.js`);
+  lib.requireAdmin(e);
+  const sum = new DynamicModel({ total: 0, count: 0 });
+  $app.db().select("COALESCE(SUM(media_size), 0) as total", "COUNT(*) as count").from("materials")
+    .where($dbx.exp("media != ''")).one(sum);
+  return e.json(200, { used: sum.total, count: sum.count, free: lib.freeBytes(), min: lib.minFreeBytes(), dir: lib.mediaDir() });
+}, $apis.requireAuth("users"));
 
 // Настройки из окружения:
 // APP_URL — адрес приложения для ссылок в письмах ({APP_URL} в шаблонах), при каждом запуске пишется в настройки;
@@ -172,6 +280,16 @@ onBootstrap((e) => {
     }
   }
   if (changed) $app.save(s);
+
+  // папка для файлов материалов (вне pb_data, поэтому в ежедневную копию они не попадают)
+  // и ключ для подписи ссылок на них
+  try {
+    const lib = require(`${__hooks}/lib.js`);
+    $os.mkdirAll(lib.mediaDir(), 0o750);
+    lib.mediaKey();
+  } catch (err) {
+    $app.logger().error("Не удалось подготовить папку материалов", "error", String(err));
+  }
 });
 
 /* ---------- Письма (правки 2.2) ---------- */

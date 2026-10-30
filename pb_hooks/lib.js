@@ -363,10 +363,122 @@ function checkMaterialMark(e) {
   e.record.set("material", o.getString("material"));
 }
 
+/* ---------- Файлы аудио и видео ---------- */
+// Лежат не в pb_data, а в отдельной папке рядом с ней (по умолчанию /opt/molitva/media).
+// Поэтому ежедневная копия pb_data (база и файлы пользователей) не разрастается на гигабайты:
+// видео в неё не попадает и не дублируется. Оригиналы хранит владелец, плюс недельная копия всего сервера.
+const MEDIA = {
+  audio: { ru: "Аудио", ext: ["mp3", "m4a"], max: 100 * MB, about: "MP3 или M4A до 100 МБ" },
+  video: { ru: "Видео", ext: ["mp4"], max: 1024 * MB, about: "MP4 (H.264 и AAC) до 1 ГБ" },
+};
+const MEDIA_TTL = 2 * 3600;        // сколько живёт ссылка на файл
+const MEDIA_COOKIE = "mol_media";  // кука, привязанная к вошедшему человеку
+
+function mediaDir() {
+  return $os.getenv("MEDIA_DIR") || $filepath.join($app.dataDir(), "..", "media");
+}
+// Папка материалов и файловая система для неё (не забывать close())
+function mediaFs() {
+  const dir = mediaDir();
+  $os.mkdirAll(dir, 0o750);
+  return $filesystem.local(dir);
+}
+// Ключ для подписи ссылок и кук. Лежит рядом с базой, создаётся сам при первом запуске.
+// Если его потерять, перестанут работать только уже выданные ссылки: приложение попросит новую.
+function mediaKey() {
+  const path = $filepath.join($app.dataDir(), "media.key");
+  try {
+    const key = toString($os.readFile(path));
+    if (key.length >= 32) return key;
+  } catch (_) {}
+  const key = $security.randomString(50);
+  $os.writeFile(path, key, 0o600);
+  return key;
+}
+// Сколько байт свободно на диске и сколько нужно оставить свободными
+function freeBytes() {
+  const out = toString($os.cmd("df", "-Pk", mediaDir()).output());
+  const lines = out.trim().split("\n");
+  const cols = lines[lines.length - 1].trim().split(/\s+/);
+  return (parseInt(cols[3], 10) || 0) * 1024;
+}
+function minFreeBytes() {
+  const gb = parseFloat($os.getenv("MEDIA_MIN_FREE_GB"));
+  return (gb > 0 ? gb : 5) * 1024 * MB;
+}
+// Имя файла в папке: id материала и случайный хвост, чтобы старые ссылки не попадали на новый файл
+function mediaName(id, ext) {
+  return id + "-" + $security.randomStringWithAlphabet(8, "abcdefghijkmnpqrstuvwxyz23456789") + "." + ext;
+}
+
+// Материалы ведёт администратор приложения (role = admin), он же загружает файлы
+function requireAdmin(e) {
+  if (!e.auth || e.auth.getString("role") !== "admin") {
+    throw new ForbiddenError("Это может сделать только администратор приложения.");
+  }
+}
+
+function cookieValue(e, name) {
+  const raw = String(e.request.header.get("Cookie") || "");
+  for (const part of raw.split(";")) {
+    const i = part.indexOf("=");
+    if (i > 0 && part.slice(0, i).trim() === name) return part.slice(i + 1).trim();
+  }
+  return "";
+}
+
+// Ссылка на файл выдаётся вместе с короткоживущей кукой, привязанной к вошедшему человеку.
+// Кука только для пути отдачи файлов, недоступна странице (HttpOnly) и не уходит на другие сайты (SameSite=Strict),
+// поэтому в чужом браузере пересланная ссылка не открывается даже пока она не устарела.
+function setMediaCookie(e, userId) {
+  const token = $security.createJWT({ u: userId, c: 1 }, mediaKey(), MEDIA_TTL + 3600);
+  const proto = String(e.request.header.get("X-Forwarded-Proto") || "").toLowerCase();
+  const secure = e.isTLS() || proto === "https"; // на сервере https завершает Caddy, он же ставит заголовок
+  e.response.header().set("Set-Cookie",
+    `${MEDIA_COOKIE}=${token}; Path=/api/molitva/media; Max-Age=${MEDIA_TTL + 3600}; HttpOnly; SameSite=Strict` + (secure ? "; Secure" : ""));
+}
+function mediaLink(e, materialId, userId) {
+  setMediaCookie(e, userId);
+  const token = $security.createJWT({ m: materialId, u: userId }, mediaKey(), MEDIA_TTL);
+  return `/api/molitva/media/${materialId}?t=${token}`;
+}
+// Кто просит файл: проверяем и подписанный ключ из адреса, и куку, и что человек в них один и тот же
+function mediaUser(e, materialId) {
+  const key = mediaKey();
+  let link = null, cookie = null;
+  try { link = $security.parseJWT(String((e.requestInfo().query || {}).t || ""), key); } catch (_) {}
+  if (!link || link.m !== materialId || !link.u) throw new UnauthorizedError("Ссылка устарела. Откройте материал в приложении заново.");
+  try { cookie = $security.parseJWT(cookieValue(e, MEDIA_COOKIE), key); } catch (_) {}
+  if (!cookie || cookie.u !== link.u) {
+    throw new UnauthorizedError("Этот файл открывается только в том браузере, где выполнен вход в приложение.");
+  }
+  return String(link.u);
+}
+// Материал, который можно показать этому человеку: опубликованный или свой для администратора
+function visibleMaterial(userId, materialId) {
+  let m = null;
+  try { m = $app.findRecordById("materials", materialId); } catch (_) {}
+  if (!m) throw new NotFoundError("Материал не найден: возможно, его убрали.");
+  if (!m.getBool("published")) {
+    let u = null;
+    try { u = $app.findRecordById("users", userId); } catch (_) {}
+    if (!u || u.getString("role") !== "admin") throw new NotFoundError("Материал не найден: возможно, его убрали.");
+  }
+  return m;
+}
+// Файл материала удаляется вместе с материалом и при замене на новый
+function deleteMedia(name) {
+  if (!name) return;
+  const fs = mediaFs();
+  try { fs.delete(name); } catch (_) {} finally { fs.close(); }
+}
+
 module.exports = {
   MB, quotaBytes, usedBytes, checkQuota, checkSectionDepth, checkSection, recordPhoto, checkDayDate, addDefaultVerse, FILE_EXT,
   MAX_MEMBERS, MAX_GROUPS, newGroupCode, groupByCode, isMember, memberGroup, ownGroup, checkGroupLimit, addMember, removeMember, handOverGroups, checkQuery,
   checkGroupDate, markGroupDay, unmarkGroupDay,
   MAIL_PER_DAY, mailAllowed, mailPolish, durationText, alertInfo,
   MAT_KIND_RU, checkMaterial, checkMaterialMark,
+  MEDIA, MEDIA_TTL, MEDIA_COOKIE, mediaDir, mediaFs, mediaKey, freeBytes, minFreeBytes, mediaName,
+  requireAdmin, cookieValue, setMediaCookie, mediaLink, mediaUser, visibleMaterial, deleteMedia,
 };
