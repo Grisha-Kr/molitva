@@ -1,7 +1,7 @@
 // Сервис-воркер: хранит оболочку приложения, чтобы оно быстро открывалось.
 // Данные (/api/) никогда не кэшируются.
-const VERSION = 'molitva-v4';
-const SHELL = ['/', '/index.html', '/app.css?v=4', '/app.js?v=4', '/vendor/pocketbase.umd.js', '/manifest.webmanifest', '/icons/icon-192.png?v=2', '/img/stone.webp', '/img/water.webp', '/img/wave-mask.svg'];
+const VERSION = 'molitva-v5';
+const SHELL = ['/', '/index.html', '/app.css?v=5', '/app.js?v=5', '/vendor/pocketbase.umd.js', '/manifest.webmanifest', '/icons/icon-192.png?v=2', '/img/stone.webp', '/img/water.webp', '/img/wave-mask.svg'];
 
 self.addEventListener('install', e => {
   e.waitUntil(caches.open(VERSION).then(c => c.addAll(SHELL)).then(() => self.skipWaiting()));
@@ -16,7 +16,9 @@ self.addEventListener('fetch', e => {
   // Сначала сеть, при отсутствии связи берём из кэша
   e.respondWith(
     fetch(e.request).then(res => {
-      if (res.ok && (url.pathname === '/' || /\.(html|css|js|woff2|png|webp|svg|webmanifest)$/.test(url.pathname))) {
+      // адреса с ключами из писем и приглашений (/?reset=…, /?invite=…) не кэшируем: подходит только пустой адрес или ?v=
+      const plain = !url.search || /^\?v=\d+$/.test(url.search);
+      if (res.ok && plain && (url.pathname === '/' || /\.(html|css|js|woff2|png|webp|svg|webmanifest)$/.test(url.pathname))) {
         const copy = res.clone();
         caches.open(VERSION).then(c => c.put(e.request, copy));
       }

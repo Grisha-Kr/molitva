@@ -45,7 +45,9 @@ const ICON = {
   right: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg>',
   dl: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v11M7 10l5 5 5-5M5 20h14"/></svg>',
   trash: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/></svg>',
-  group: '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="9" cy="8" r="3"/><path d="M3 19c0-3 2.7-5 6-5s6 2 6 5"/><circle cx="17" cy="9" r="2.5"/><path d="M16 14c2.8 0 5 1.7 5 4.5"/></svg>'
+  group: '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="9" cy="8" r="3"/><path d="M3 19c0-3 2.7-5 6-5s6 2 6 5"/><circle cx="17" cy="9" r="2.5"/><path d="M16 14c2.8 0 5 1.7 5 4.5"/></svg>',
+  eye: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12z"/><circle cx="12" cy="12" r="3"/></svg>',
+  eyeOff: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12z"/><circle cx="12" cy="12" r="3"/><path d="M4 4l16 16"/></svg>'
 };
 
 /* ---------- Состояние ---------- */
@@ -179,9 +181,13 @@ async function boot(){
   if('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {});
   const qs = new URLSearchParams(location.search);
   const invite = qs.get('invite'), join = qs.get('group');
+  // ссылка из письма: /?reset=КЛЮЧ, /?verify=КЛЮЧ, /?email-change=КЛЮЧ
+  const mail = MAIL_LINKS.find(k => qs.get(k));
   // ссылка в группу: код запоминаем, после входа приложение предложит вступить
   if(join) saveLS('join', join.trim());
-  if(invite || join) history.replaceState(null, '', location.pathname + location.hash);
+  // ключ из письма сразу убираем из адресной строки и истории
+  if(invite || join || mail) history.replaceState(null, '', location.pathname + location.hash);
+  if(mail){ showMailLink(mail, qs.get(mail).trim()); return; }
   if(!pb.authStore.isValid){ showAuth(invite ? 'register' : 'login', invite); return; }
   try { await pb.collection('users').authRefresh(); }
   catch(e){ if(e && e.status && e.status !== 0){ pb.authStore.clear(); showAuth('login'); return; } }
@@ -1734,13 +1740,40 @@ document.addEventListener('input', e => {
 document.addEventListener('toggle', e => { if(e.target.id === 'files-fold') UI.filesOpen = e.target.open; }, true);
 
 /* ---------- Вход и регистрация ---------- */
-let authMode = 'login', authInvite = '', isFirstRun = false;
+let authMode = 'login', authInvite = '', authEmail = '', isFirstRun = false;
+// «Забыли пароль?»: повторная отправка через 2 минуты. Раньше PocketBase сам не отправит второе письмо на ту же почту
+const RESET_WAIT = 120e3;
+const RESET_SENT = 'Если такой адрес зарегистрирован, письмо придёт в течение нескольких минут. Проверьте папку «Спам».';
+let resetSent = false, resetTimer = 0;
 async function showAuth(mode, invite){
   $('#app').hidden = true; $('#auth').hidden = false;
   authMode = mode || 'login'; if(invite) authInvite = invite;
   try { const r = await fetch('/api/molitva/setup'); if(r.ok) isFirstRun = !!(await r.json()).firstRun; } catch(e){}
   if(isFirstRun) authMode = 'register';
   renderAuth();
+}
+// Поле пароля с кнопкой «показать или скрыть»
+const passInput = (id, auto, extra) => `<span class="pass"><input type="password" id="${id}" autocomplete="${auto}"${extra || ''}><button type="button" class="eye" data-eye="${id}" aria-label="Показать пароль" aria-pressed="false">${ICON.eye}</button></span>`;
+$('#auth').addEventListener('click', e => {
+  const b = e.target.closest('[data-eye]'); if(!b) return;
+  const inp = document.getElementById(b.dataset.eye), show = inp.type === 'password';
+  inp.type = show ? 'text' : 'password';
+  b.innerHTML = show ? ICON.eyeOff : ICON.eye;
+  b.setAttribute('aria-pressed', String(show)); b.setAttribute('aria-label', show ? 'Скрыть пароль' : 'Показать пароль');
+});
+function resetLeft(){ return Math.max(0, loadLS('resetAt', 0) + RESET_WAIT - Date.now()); }
+// Обратный отсчёт на кнопке «Отправить ещё раз»
+function tickReset(){
+  clearInterval(resetTimer);
+  const upd = () => {
+    const btn = $('#auth-form[data-mode="reset"] [type=submit]');
+    if(!btn){ clearInterval(resetTimer); return; }
+    const left = Math.ceil(resetLeft() / 1000);
+    btn.disabled = left > 0;
+    btn.textContent = left > 0 ? `Отправить ещё раз через ${Math.floor(left / 60)}:${String(left % 60).padStart(2, '0')}` : resetSent ? 'Отправить ещё раз' : 'Отправить ссылку';
+    if(left <= 0) clearInterval(resetTimer);
+  };
+  upd(); resetTimer = setInterval(upd, 1000);
 }
 function renderAuth(msg, ok){
   const b = $('#auth-body');
@@ -1755,8 +1788,8 @@ function renderAuth(msg, ok){
       ${isFirstRun ? '' : `<label>Код приглашения<input type="text" id="a-invite" autocomplete="off" autocapitalize="characters" value="${esc(authInvite)}" required></label>`}
       <label>Имя<input type="text" id="a-name" autocomplete="name"></label>
       <label>Почта<input type="email" id="a-email" autocomplete="email" required></label>
-      <label>Пароль (не короче 8 символов)<input type="password" id="a-pass" autocomplete="new-password" minlength="8" required></label>
-      <label>Повторите пароль<input type="password" id="a-pass2" autocomplete="new-password" required></label>
+      <label>Пароль (не короче 8 символов)${passInput('a-pass', 'new-password', ' minlength="8" required')}</label>
+      <label>Повторите пароль${passInput('a-pass2', 'new-password', ' required')}</label>
       <label class="check"><input type="checkbox" id="a-consent"><span>Согласен на обработку персональных данных по <a href="/privacy.html" target="_blank" rel="noopener">политике конфиденциальности</a></span></label>
       ${note}<button class="btn primary big wide" type="submit">Создать аккаунт</button>
       ${isFirstRun ? '' : `<div class="auth-links"><button type="button" class="linkbtn" data-auth="login">У меня уже есть аккаунт</button></div>`}
@@ -1764,25 +1797,33 @@ function renderAuth(msg, ok){
   } else if(authMode === 'reset'){
     $('#auth-sub').textContent = 'Пришлём ссылку для нового пароля на вашу почту.';
     b.innerHTML = `<form class="stack" id="auth-form" data-mode="reset" novalidate>
-      <label>Почта<input type="email" id="a-email" autocomplete="email" required></label>
+      <label>Почта<input type="email" id="a-email" autocomplete="email" value="${esc(authEmail)}" required></label>
+      ${resetSent ? `<p class="form-ok" role="status">${esc(RESET_SENT)}</p>` : ''}
       ${note}<button class="btn primary big wide" type="submit">Отправить ссылку</button>
       <div class="auth-links"><button type="button" class="linkbtn" data-auth="login">Вернуться ко входу</button></div>
     </form>`;
+    tickReset();
   } else {
     $('#auth-sub').textContent = 'Нужды, молитвы и дни молитвы в одном месте.';
     b.innerHTML = `<form class="stack" id="auth-form" data-mode="login" novalidate>${joinNote}
-      <label>Почта<input type="email" id="a-email" autocomplete="email" required></label>
-      <label>Пароль<input type="password" id="a-pass" autocomplete="current-password" required></label>
+      <label>Почта<input type="email" id="a-email" autocomplete="email" value="${esc(authEmail)}" required></label>
+      <label>Пароль${passInput('a-pass', 'current-password', ' required')}</label>
       ${note}<button class="btn primary big wide" type="submit">Войти</button>
       <div class="auth-links"><button type="button" class="linkbtn" data-auth="register">Регистрация по приглашению</button><button type="button" class="linkbtn" data-auth="reset">Забыли пароль?</button></div>
     </form>`;
   }
 }
-$('#auth').addEventListener('click', e => { const b = e.target.closest('[data-auth]'); if(b){ authMode = b.dataset.auth; renderAuth(); } });
+$('#auth').addEventListener('click', e => {
+  const b = e.target.closest('[data-auth]'); if(!b) return;
+  const em = $('#a-email'); if(em && em.value.trim()) authEmail = em.value.trim();
+  if(b.dataset.auth !== 'reset') resetSent = false;
+  authMode = b.dataset.auth; renderAuth();
+});
 $('#auth').addEventListener('submit', async e => {
   e.preventDefault();
   const f = e.target, btn = f.querySelector('[type=submit]');
   const v = id => (f.querySelector('#' + id)?.value || '').trim();
+  if(f.dataset.mode === 'newpass'){ submitNewPass(f); return; }
   btn.disabled = true;
   try{
     if(f.dataset.mode === 'login'){
@@ -1804,15 +1845,103 @@ $('#auth').addEventListener('submit', async e => {
       isFirstRun = false;
       startApp();
     } else {
-      if(!v('a-email')) throw {msg:'Введите почту.'};
-      await pb.collection('users').requestPasswordReset(v('a-email'));
-      authMode = 'login'; renderAuth('Если такой адрес зарегистрирован, письмо со ссылкой уже отправлено. Проверьте и папку «Спам».', true); return;
+      // Ответ сервера одинаковый для любого адреса, поэтому и сообщение всегда одно
+      const email = v('a-email');
+      if(!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw {msg:'Проверьте адрес почты.'};
+      if(resetLeft() > 0) return;
+      try { await pb.collection('users').requestPasswordReset(email); }
+      catch(err){
+        if(err.status === 429) throw {msg:'Писем было слишком много. Попробуйте снова через час.'};
+        if(err.status === 400) throw {msg:'Проверьте адрес почты.'};
+        throw err;
+      }
+      authEmail = email; resetSent = true; saveLS('resetAt', Date.now());
+      renderAuth(); return;
     }
-  }catch(err){
-    const fe = $('#auth-form');
-    if(fe){ let p = fe.querySelector('.form-err'); if(!p){ p = document.createElement('p'); p.className = 'form-err'; fe.querySelector('[type=submit]').before(p); } p.textContent = err.msg || errText(err); }
-  }finally{ btn.disabled = false; }
+  }catch(err){ authErr(err.msg || errText(err)); }
+  finally{ if(f.dataset.mode === 'reset') tickReset(); else btn.disabled = false; }
 });
+function authErr(text){
+  const fe = $('#auth-form'); if(!fe) return;
+  let p = fe.querySelector('.form-err');
+  if(!p){ p = document.createElement('p'); p.className = 'form-err'; fe.querySelector('[type=submit]').before(p); }
+  p.textContent = text;
+}
+
+/* ---------- Ссылки из писем ---------- */
+const MAIL_LINKS = ['reset', 'verify', 'email-change'];
+// Ключ из письма: id, почта и срок (exp) лежат в его средней части
+function tokenInfo(token){
+  try { return JSON.parse(decodeURIComponent(escape(atob(token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/'))))) || {}; }
+  catch(e){ return {}; }
+}
+let mailToken = '';
+function showMailLink(kind, token){
+  $('#app').hidden = true; $('#auth').hidden = false;
+  mailToken = token;
+  const info = tokenInfo(token);
+  if(info.email) authEmail = info.email;
+  const expired = !info.exp || info.exp * 1000 < Date.now();
+  if(kind === 'reset') expired ? mailDone('reset-old') : renderNewPass();
+  else if(kind === 'verify') confirmVerify(expired);
+  else mailDone('change');
+}
+// Открыть дневник после экрана из письма: вход, если нужно
+function openDiary(){ pb.authStore.isValid ? boot() : showAuth('login'); }
+const MAIL_SCREENS = {
+  'reset-ok': ['Пароль изменён', 'Теперь войдите с новым паролем.', 'Войти', 'login'],
+  'reset-old': ['Ссылка устарела', 'Ссылка для нового пароля действует ограниченное время и срабатывает один раз. Запросите новое письмо.', 'Запросить новое письмо', 'reset'],
+  'verify-ok': ['Почта подтверждена', 'Спасибо. Теперь можно вернуться к дневнику.', 'Открыть дневник', 'diary'],
+  'verify-old': ['Ссылка устарела', 'Ссылка для подтверждения почты устарела или уже использована. Если почта уже подтверждена, ничего делать не нужно.', 'Открыть дневник', 'diary'],
+  'change': ['Смена почты', 'Смена почты в приложении пока не поддерживается, почта для входа осталась прежней. Чтобы сменить её, напишите администратору.', 'Открыть дневник', 'diary'],
+};
+function mailDone(key){
+  const [title, text, btn, next] = MAIL_SCREENS[key];
+  $('#auth-sub').textContent = '';
+  $('#auth-body').innerHTML = `<div class="stack" role="status"><h2 class="auth-title">${esc(title)}</h2><p class="muted">${esc(text)}</p>
+    <button type="button" class="btn primary big wide" id="mail-next">${esc(btn)}</button></div>`;
+  $('#mail-next').onclick = () => {
+    if(next === 'diary') openDiary();
+    else { authMode = next; resetSent = false; renderAuth(); }
+  };
+}
+function renderNewPass(){
+  $('#auth-sub').textContent = authEmail ? 'Новый пароль для ' + authEmail : 'Придумайте новый пароль.';
+  $('#auth-body').innerHTML = `<form class="stack" id="auth-form" data-mode="newpass" novalidate>
+    <input type="email" autocomplete="username" value="${esc(authEmail)}" hidden>
+    <label>Новый пароль (не короче 8 символов)${passInput('n-pass', 'new-password', ' minlength="8" required')}</label>
+    <label>Повторите пароль${passInput('n-pass2', 'new-password', ' required')}</label>
+    <button class="btn primary big wide" type="submit">Сохранить пароль</button>
+  </form>`;
+}
+async function submitNewPass(f){
+  const p1 = f.querySelector('#n-pass').value, p2 = f.querySelector('#n-pass2').value;
+  if(p1.length < 8) return authErr('Пароль должен быть не короче 8 символов.');
+  if(p1 !== p2) return authErr('Пароли не совпадают.');
+  const btn = f.querySelector('[type=submit]'); btn.disabled = true;
+  try {
+    await pb.collection('users').confirmPasswordReset(mailToken, p1, p2);
+    // после смены пароля прежние входы этого человека больше не действуют
+    const info = tokenInfo(mailToken);
+    if(pb.authStore.record && pb.authStore.record.id === info.id) pb.authStore.clear();
+    mailDone('reset-ok');
+  } catch(err){
+    const data = (err.response || {}).data || {};
+    if(data.token || err.status === 404) mailDone('reset-old');
+    else { authErr(errText(err)); btn.disabled = false; }
+  }
+}
+async function confirmVerify(expired){
+  if(expired){ mailDone('verify-old'); return; }
+  $('#auth-sub').textContent = '';
+  $('#auth-body').innerHTML = '<p class="muted" role="status">Подтверждаю почту…</p>';
+  try { await pb.collection('users').confirmVerification(mailToken); mailDone('verify-ok'); }
+  catch(err){
+    if(err.status !== 0){ mailDone('verify-old'); return; }
+    $('#auth-body').innerHTML = `<div class="stack"><p class="form-err">${esc(errText(err))}</p><button type="button" class="btn primary big wide" id="mail-next">Попробовать ещё раз</button></div>`;
+    $('#mail-next').onclick = () => confirmVerify(false);
+  }
+}
 
 /* ---------- Профиль: пароль, приглашения, выход ---------- */
 const INV_ABC = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';

@@ -231,8 +231,106 @@ function checkQuery(e) {
   }
 }
 
+/* ---------- Письма (правки 2.2) ---------- */
+const MAIL_PER_DAY = 5; // писем в сутки на одну почту: сброс пароля, подтверждение и смена почты вместе
+
+// Можно ли отправить ещё одно письмо этому человеку. Если можно, письмо записывается в mail_log.
+// Если нельзя, хук отвечает как обычно (204), но письмо не уходит: по ответу не узнать, есть ли такая почта.
+function mailAllowed(user, kind) {
+  const ago = (days) => new Date(Date.now() - days * 864e5).toISOString().replace("T", " ");
+  $app.db().newQuery("DELETE FROM mail_log WHERE created < {:t}").bind({ t: ago(7) }).execute();
+  const sent = $app.countRecords("mail_log", $dbx.exp("user = {:u} AND created > {:t}", { u: user.id, t: ago(1) }));
+  if (sent >= MAIL_PER_DAY) {
+    $app.logger().warn("Письмо не отправлено: на эту почту за сутки уже ушло " + MAIL_PER_DAY + " писем", "user", user.id, "kind", kind);
+    return false;
+  }
+  const r = new Record($app.findCollectionByNameOrId("mail_log"));
+  r.set("user", user.id);
+  r.set("kind", kind);
+  $app.save(r);
+  return true;
+}
+
+function plural(n, one, few, many) {
+  const a = n % 10, b = n % 100;
+  return n + " " + (a === 1 && b !== 11 ? one : a >= 2 && a <= 4 && (b < 12 || b > 14) ? few : many);
+}
+function durationText(sec) {
+  if (sec >= 86400 && sec % 86400 === 0) return plural(sec / 86400, "день", "дня", "дней");
+  if (sec >= 3600 && sec % 3600 === 0) return plural(sec / 3600, "час", "часа", "часов");
+  return plural(Math.max(1, Math.round(sec / 60)), "минуту", "минуты", "минут");
+}
+const TTL_OPTION = { reset: "passwordResetToken", verify: "verificationToken", change: "emailChangeToken", otp: "otp" };
+
+const escHtml = (s) => String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+
+// Устройство из строки браузера (User-Agent) коротко и по-русски
+function deviceName(ua) {
+  const os = /iPhone/.test(ua) ? "iPhone" : /iPad/.test(ua) ? "iPad" : /Android/.test(ua) ? "Android"
+    : /Mac OS X|Macintosh/.test(ua) ? "Mac" : /Windows/.test(ua) ? "Windows" : /Linux/.test(ua) ? "Linux" : "";
+  const br = /YaBrowser/.test(ua) ? "Яндекс Браузер" : /Edg\//.test(ua) ? "Edge" : /OPR\//.test(ua) ? "Opera"
+    : /Firefox|FxiOS/.test(ua) ? "Firefox" : /Chrome|CriOS/.test(ua) ? "Chrome" : /Safari/.test(ua) ? "Safari" : "";
+  return [br, os].filter(Boolean).join(", ") || "неизвестное устройство";
+}
+// Сведения о входе от PocketBase («2026-10-30 12:00:00.000Z - IP браузер») в три строки по-русски
+function alertInfo(info) {
+  const m = /^(\d{4})-(\d\d)-(\d\d) (\d\d):(\d\d)\S* - (\S+) ?(.*)$/.exec(info || "");
+  if (!m) return info;
+  const d = new Date(Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5]) + 3 * 3600e3); // по Москве
+  const two = (x) => String(x).padStart(2, "0");
+  const when = `${two(d.getUTCDate())}.${two(d.getUTCMonth() + 1)}.${d.getUTCFullYear()}, ${two(d.getUTCHours())}:${two(d.getUTCMinutes())} по Москве`;
+  const ua = m[7].replace(/&#34;|&quot;/g, '"').replace(/&#39;/g, "'").replace(/&amp;/g, "&");
+  return `Когда: ${when}<br>Адрес в интернете: ${escHtml(m[6])}<br>Устройство: ${escHtml(deviceName(ua))}`;
+}
+
+const MAIL_HEAD = `<!DOCTYPE html>
+<html lang="ru"><head>
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<meta name="supported-color-schemes" content="light dark">
+<style>
+:root{color-scheme:light dark;supported-color-schemes:light dark}
+body{margin:0;padding:0;-webkit-text-size-adjust:100%}
+@media (prefers-color-scheme: dark){
+  body,.mol-bg{background:#171815!important}
+  .mol-card{background:#23241F!important;color:#ECEAE3!important}
+  .mol-ink{color:#ECEAE3!important}
+  .mol-muted{color:#A39F95!important}
+  .mol-link{color:#B9C77F!important}
+  .mol-btn{background:#A9B972!important}
+  .mol-btn-a{color:#1B1F0E!important}
+  .mol-box{background:#30361F!important;color:#E4EACB!important}
+}
+</style>
+</head>
+<body style="margin:0;padding:0;background:#F2F0EB;">`;
+const MAIL_FOOT = "</body></html>";
+
+// Письмо перед отправкой: обращение по имени, срок ссылки из настроек коллекции и своя обёртка вместо стандартной PocketBase.
+// Если в шаблоне нет меток <!--mol--> (шаблон переписали в панели), письмо уходит как есть.
+function mailPolish(e, kind) {
+  try {
+    const html = e.message.html;
+    const a = html.indexOf("<!--mol-->"), b = html.indexOf("<!--/mol-->");
+    if (a < 0 || b < a) return;
+    let body = html.slice(a, b + "<!--/mol-->".length);
+    const name = e.record ? e.record.getString("name").trim() : "";
+    body = body.split("{MOL_HELLO}").join(name ? `Здравствуйте, ${escHtml(name)}.` : "Здравствуйте.");
+    if (TTL_OPTION[kind]) {
+      const opt = e.record.collection()[TTL_OPTION[kind]];
+      body = body.split("{MOL_TTL}").join(durationText(opt.duration));
+    }
+    if (kind === "alert" && e.meta && e.meta.info) body = body.split(e.meta.info).join(alertInfo(e.meta.info));
+    e.message.html = MAIL_HEAD + body + MAIL_FOOT;
+  } catch (err) {
+    $app.logger().warn("Не удалось оформить письмо, ушло стандартное", "kind", kind, "error", String(err));
+  }
+}
+
 module.exports = {
   MB, quotaBytes, usedBytes, checkQuota, checkSectionDepth, checkSection, recordPhoto, checkDayDate, addDefaultVerse, FILE_EXT,
   MAX_MEMBERS, MAX_GROUPS, newGroupCode, groupByCode, isMember, memberGroup, ownGroup, checkGroupLimit, addMember, removeMember, handOverGroups, checkQuery,
   checkGroupDate, markGroupDay, unmarkGroupDay,
+  MAIL_PER_DAY, mailAllowed, mailPolish, durationText, alertInfo,
 };

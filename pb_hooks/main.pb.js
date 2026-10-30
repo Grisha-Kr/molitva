@@ -139,8 +139,9 @@ onRecordUpdateRequest((e) => {
 }, "need_files");
 
 // Настройки из окружения:
-// APP_URL — адрес приложения для писем (сброс пароля);
-// BEHIND_PROXY=1 — приложение стоит за Caddy, настоящий IP посетителя берётся из X-Forwarded-For.
+// APP_URL — адрес приложения для ссылок в письмах ({APP_URL} в шаблонах), при каждом запуске пишется в настройки;
+// BEHIND_PROXY=1 — приложение стоит за Caddy, настоящий IP посетителя берётся из X-Forwarded-For
+// (по нему же считают ограничения частоты запросов).
 onBootstrap((e) => {
   e.next();
   const s = $app.settings();
@@ -159,6 +160,32 @@ onBootstrap((e) => {
   }
   if (changed) $app.save(s);
 });
+
+/* ---------- Письма (правки 2.2) ---------- */
+// Шаблоны писем записаны миграцией 1774000000_v22.js. Перед отправкой хук подставляет имя и срок ссылки
+// и меняет обёртку письма. Настройки почты (SMTP, отправитель) хуки не трогают.
+onMailerRecordPasswordResetSend((e) => { require(`${__hooks}/lib.js`).mailPolish(e, "reset"); e.next(); }, "users");
+onMailerRecordVerificationSend((e) => { require(`${__hooks}/lib.js`).mailPolish(e, "verify"); e.next(); }, "users");
+onMailerRecordEmailChangeSend((e) => { require(`${__hooks}/lib.js`).mailPolish(e, "change"); e.next(); }, "users");
+onMailerRecordOTPSend((e) => { require(`${__hooks}/lib.js`).mailPolish(e, "otp"); e.next(); }, "users");
+onMailerRecordAuthAlertSend((e) => { require(`${__hooks}/lib.js`).mailPolish(e, "alert"); e.next(); }, "users");
+
+// Не больше 5 писем в сутки на одну почту (сверх того 3 запроса в час с одного адреса в интернете, см. миграцию).
+// Сверх лимита ответ тот же (204), что и при отправке: по нему не узнать, зарегистрирована ли почта.
+onRecordRequestPasswordResetRequest((e) => {
+  if (!e.hasSuperuserAuth() && !require(`${__hooks}/lib.js`).mailAllowed(e.record, "reset")) return e.noContent(204);
+  e.next();
+}, "users");
+onRecordRequestVerificationRequest((e) => {
+  if (!e.hasSuperuserAuth() && !e.record.verified() && !require(`${__hooks}/lib.js`).mailAllowed(e.record, "verify")) return e.noContent(204);
+  e.next();
+}, "users");
+// Смены почты в приложении пока нет: запрос не принимается, чтобы через прямой запрос к API
+// никто не отправил письмо с ящика приложения на чужой адрес. Почту пользователя может сменить администратор в панели /_/.
+onRecordRequestEmailChangeRequest((e) => {
+  if (!e.hasSuperuserAuth()) throw new BadRequestError("Смена почты в приложении пока не поддерживается. Напишите администратору.");
+  e.next();
+}, "users");
 
 // Сведения для экрана входа и политики конфиденциальности.
 routerAdd("GET", "/api/molitva/setup", (e) => {

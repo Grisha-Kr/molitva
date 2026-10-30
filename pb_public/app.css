@@ -517,6 +517,13 @@ dialog form{display:flex;flex-direction:column;max-height:calc(100dvh - 32px)}
 .check{flex-direction:row!important;align-items:flex-start;gap:10px!important;font-weight:500!important;color:var(--ink)!important;font-size:14px!important}
 .check input{margin-top:2px;width:20px;height:20px;flex:none;accent-color:var(--accent)}
 .auth-links{display:flex;flex-wrap:wrap;justify-content:space-between;gap:10px;font-size:14px}
+.auth-title{font-family:var(--f-head);font-size:22px;font-weight:600}
+/* Поле пароля с кнопкой «показать или скрыть» */
+.pass{position:relative;display:block}
+.pass input{padding-right:52px}
+.eye{appearance:none;position:absolute;right:2px;top:50%;transform:translateY(-50%);width:44px;height:44px;border:0;background:none;border-radius:10px;color:var(--muted);cursor:pointer;display:grid;place-items:center}
+.eye svg{width:22px;height:22px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
+.eye[aria-pressed="true"]{color:var(--accent-text)}
 
 @media (min-width:700px){
   main{padding-top:28px}
