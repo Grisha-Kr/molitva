@@ -15,9 +15,8 @@ const PERIODS = {daily:['Каждый день', 1], every3:['Раз в 3 дня
 const VERSE_EPOCH = '2026-01-01'; // от этой даты считается смена стиха
 const MAX_VERSES = 7;
 const MB = 1024*1024;
-const MAX_PHOTO = 10*MB, MAX_FILE = 20*MB;
-const FILE_EXT = ['pdf','doc','docx','jpg','jpeg','png','gif','webp','heic','heif'];
-const PBN = {sections:'sections', needs:'needs', files:'need_files', prayers:'prayers', verses:'verses', days:'prayer_days', daily:'daily_verses',
+const MAX_PHOTO = 10*MB;
+const PBN = {sections:'sections', needs:'needs', prayers:'prayers', verses:'verses', days:'prayer_days', daily:'daily_verses',
   groups:'groups', gmembers:'group_members', glinks:'group_needs', gpray:'group_praying', gdays:'group_days', people:'users', shared:'needs',
   materials:'materials', marks:'material_marks'};
 const KEYS = Object.keys(PBN);
@@ -35,7 +34,6 @@ const ICON = {
   plus: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>',
   pen: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20h4L19 9l-4-4L4 16z"/></svg>',
   lock: '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg>',
-  clip: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11.5l-8 8a5 5 0 0 1-7-7l8.5-8.5a3.3 3.3 0 0 1 4.7 4.7L9.7 17a1.7 1.7 0 0 1-2.4-2.4L15 7"/></svg>',
   chev: '<svg class="chev" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg>',
   check: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>',
   // сложенные руки: Phosphor Icons, лицензия MIT (icons/LICENSE-phosphor-icons.txt)
@@ -63,11 +61,11 @@ const ICON = {
 };
 
 /* ---------- Состояние ---------- */
-const S = {sections:[], needs:[], files:[], prayers:[], verses:[], days:[], daily:[], invites:[], usage:null, loaded:false,
+const S = {sections:[], needs:[], prayers:[], verses:[], days:[], daily:[], invites:[], usage:null, loaded:false,
   groups:[], gmembers:[], glinks:[], gpray:[], gdays:[], people:[], shared:[], materials:[], marks:[], mediaUsage:null};
 const loadLS = (k, d) => { try { const v = localStorage.getItem('mol_'+k); return v == null ? d : JSON.parse(v); } catch(e){ return d; } };
 const saveLS = (k, v) => { try { localStorage.setItem('mol_'+k, JSON.stringify(v)); } catch(e){} };
-const UI = {reorder:'', filesOpen:false, form:null, hops:0, verseDay:undefined, verseAt:0, join:null, archOpen:false, up:0};
+const UI = {reorder:'', form:null, hops:0, verseDay:undefined, verseAt:0, join:null, archOpen:false, up:0};
 const pb = new PocketBase(location.origin);
 pb.autoCancellation(false);
 const me = () => pb.authStore.record || {};
@@ -266,7 +264,7 @@ function route(){
 const go = (hash, replace) => { if(replace) location.replace(hash); else location.hash = hash; };
 // Назад внутри приложения; если пришли по прямой ссылке, переходим на запасной адрес
 function goBack(fallback){ if(UI.hops > 0) history.back(); else go(fallback, true); }
-window.addEventListener('hashchange', () => { UI.hops++; UI.reorder = ''; UI.filesOpen = false; closeMenu(); render(true); window.scrollTo(0, 0); });
+window.addEventListener('hashchange', () => { UI.hops++; UI.reorder = ''; closeMenu(); render(true); window.scrollTo(0, 0); });
 
 /* ---------- Отрисовка ---------- */
 function render(force){
@@ -424,7 +422,6 @@ function vNeed(r){
     : '';
   const prayedToday = n.last_prayed_at === t;
   const prayers = S.prayers.filter(p => p.need === n.id).sort((a, b) => String(b.date).localeCompare(String(a.date)) || String(b.created).localeCompare(String(a.created)));
-  const files = S.files.filter(f => f.need === n.id).sort((a, b) => String(b.created).localeCompare(String(a.created)));
   const meta = ['С ' + fmtDay(createdISO(n)), n.answered_at ? '' : prayedText(n.last_prayed_at).toLowerCase()].filter(Boolean).join(' · ');
   // открыли из группы: «Назад» ведёт в группу
   const fromG = r.q.get('g') ? byId('groups', r.q.get('g')) : null;
@@ -441,13 +438,7 @@ function vNeed(r){
     ${needShareHTML(n)}
     <h2 class="label">Мои молитвы <span class="side">${ICON.lock}видно только вам</span></h2>
     ${prayers.length ? `<div class="entries">${prayers.map(p => `<button type="button" class="entry" data-act="edit-prayer" data-id="${esc(p.id)}"><small>${fmtDay(p.date)}</small><span>${esc(p.text)}</span></button>`).join('')}</div>` : ''}
-    <button type="button" class="dashed" data-act="new-prayer" data-id="${esc(n.id)}">+ Записать молитву</button>
-    <details class="fold" id="files-fold"${UI.filesOpen ? ' open' : ''}><summary><span>${ICON.clip}Файлы · ${files.length}</span>${ICON.chev}</summary>
-      <div class="fold-body">
-        ${files.length ? `<div>${files.map(fileRow).join('')}</div>` : '<p class="hint">Документы и картинки к этой нужде. Их видите только вы.</p>'}
-        <label class="btn sm upload" for="nf-input" style="align-self:flex-start">${ICON.clip}Прикрепить файл<input type="file" id="nf-input" multiple accept="${FILE_EXT.map(x => '.' + x).join(',')},image/*"></label>
-        <p class="hint" style="font-size:12.5px">PDF, Word (doc, docx) и картинки, до 20 МБ каждый.</p>
-      </div></details>`;
+    <button type="button" class="dashed" data-act="new-prayer" data-id="${esc(n.id)}">+ Записать молитву</button>`;
 }
 
 /* ---------- Новый раздел и изменение раздела ---------- */
@@ -642,7 +633,7 @@ function vGroup(r){
       <div class="gw-grid">${head}${rows}</div></section>
     <h2 class="label">Общие нужды${links.length ? `<span class="side">${links.length}</span>` : ''}</h2>
     ${links.length ? `<div class="needs">${links.map(x => gneedRow(x.l, x.n)).join('')}</div>`
-      : '<p class="hint">Здесь будут нужды, которыми участники поделились с группой. Записи молитв и файлы при этом видит только владелец нужды.</p>'}
+      : '<p class="hint">Здесь будут нужды, которыми участники поделились с группой. Записи молитв при этом видит только владелец нужды.</p>'}
     <button type="button" class="dashed" data-act="g-add-need" data-id="${esc(g.id)}">+ Нужда в группу</button>`;
 }
 
@@ -664,7 +655,7 @@ function vGroupNeed(r){
     <div class="need-head${n.photo ? ' center' : ''}"><h1>${esc(n.title)}</h1><span>${esc(owner)} · ${fmtDay(createdISO(l))}</span></div>
     ${n.description ? `<p class="prose">${esc(n.description)}</p>` : ''}
     ${n.answered_at ? answer : `<div class="gn-pray">${gPrayBtn(l)}${gCount(l)}</div>`}
-    <p class="hint">Записи молитв и файлы этой нужды видит только ${esc(owner)}.</p>`;
+    <p class="hint">Записи молитв этой нужды видит только ${esc(owner)}.</p>`;
 }
 
 // Приглашение по ссылке ?group=КОД: название группы и создатель, кнопка «Вступить»
@@ -680,7 +671,7 @@ function vJoin(r){
   if(d.member) return head + `<section class="card join-card">${top}<p>Вы уже участник этой группы.</p><a class="btn primary big wide" href="#/g/${esc(d.id)}">Открыть группу</a></section>`;
   if(d.full) return head + `<section class="card join-card">${top}<p>В группе уже ${MAX_MEMBERS} участников, больше вступить нельзя.</p><a class="btn wide" href="#/groups">К группам</a></section>`;
   return head + `<section class="card join-card">${top}
-    <p class="hint">Участники увидят ваше имя, фото профиля, в какие дни вы молились в группе, за какие общие нужды молились сегодня, и нужды, которыми вы сами поделитесь. Записи молитв и файлы останутся видны только вам.</p>
+    <p class="hint">Участники увидят ваше имя, фото профиля, в какие дни вы молились в группе, за какие общие нужды молились сегодня, и нужды, которыми вы сами поделитесь. Записи молитв останутся видны только вам.</p>
     <button type="button" class="btn primary big wide" data-act="join" data-code="${esc(code)}">Вступить</button>
     <a class="btn ghost wide" href="#/groups">Не сейчас</a></section>`;
 }
@@ -715,7 +706,7 @@ function openShare(n){
   }
   const now = linksOfNeed(n.id);
   openForm({title: 'Поделиться с группой',
-    text: 'Нужда останется в вашем разделе, в группе появится ссылка на неё. Участники увидят название, описание и фото. Записи молитв и файлы видны только вам.' + (now.length ? ' Если снять галочку, нужда пропадёт из группы. Дни, когда участники за неё молились, в неделе группы останутся.' : ''),
+    text: 'Нужда останется в вашем разделе, в группе появится ссылка на неё. Участники увидят название, описание и фото. Записи молитв видны только вам.' + (now.length ? ' Если снять галочку, нужда пропадёт из группы. Дни, когда участники за неё молились, в неделе группы останутся.' : ''),
     fields: [{key:'groups', label:'Мои группы', type:'checks', options: gs.map(g => { const k = membersOf(g.id).length; return [g.id, g.name, `${k} ${plural(k, MEMBERS)}`]; })}],
     values: {groups: now.map(l => l.group)}, submit: 'Сохранить',
     async onSave(v){
@@ -1209,7 +1200,7 @@ function vProfile(){
   const u = me();
   const answered = S.needs.filter(n => n.answered_at).length;
   const inv = S.invites.slice().sort((a, b) => String(b.created).localeCompare(String(a.created)));
-  const usage = S.usage ? `<p class="hint">Фото и файлы занимают ${fsize(S.usage.used || 1)} из ${Math.round(S.usage.quota / MB)} МБ.</p>` : '';
+  const usage = S.usage ? `<p class="hint">Фото занимают ${fsize(S.usage.used || 1)} из ${Math.round(S.usage.quota / MB)} МБ.</p>` : '';
   return `<header class="head"><h1>Профиль</h1></header>
     <section class="card me-card"><span class="me" aria-hidden="true">${avatarInner(u)}</span><div class="who"><b>${esc(u.name || 'Без имени')}</b><span>${esc(u.email || '')}</span>
         <button type="button" class="btn sm" data-act="avatar">${u.avatar ? 'Изменить фото' : 'Поставить фото'}</button></div>
@@ -1238,7 +1229,7 @@ function vProfile(){
     ${usage}
     <button type="button" class="btn wide" data-act="logout">Выйти</button>
     <details class="fold"><summary><span>Удаление аккаунта</span>${ICON.chev}</summary><div class="fold-body">
-      <p class="hint">Вместе с аккаунтом удалятся все разделы, нужды, записи молитв, стихи, фото и файлы. Вернуть их будет нельзя. Ваши нужды пропадут из групп; группы, где вы создатель, перейдут к другому участнику.</p>
+      <p class="hint">Вместе с аккаунтом удалятся все разделы, нужды, записи молитв, стихи и фото. Вернуть их будет нельзя. Ваши нужды пропадут из групп; группы, где вы создатель, перейдут к другому участнику.</p>
       <button type="button" class="btn danger" data-act="delete-account">Удалить аккаунт и все данные</button></div></details>
     <p class="hint"><a href="/privacy.html" target="_blank" rel="noopener">Политика конфиденциальности</a></p>`;
 }
@@ -1249,7 +1240,7 @@ async function loadProfileExtras(){
 }
 window.addEventListener('hashchange', () => { if(route().name === 'profile' && S.loaded) loadProfileExtras(); });
 
-/* ---------- Фото нужд и файлы: защищённые, открываются по токену ---------- */
+/* ---------- Фото: защищённые, открываются по токену ---------- */
 let tokP = null, tokAt = 0;
 function fileToken(){
   if(!tokP || Date.now() - tokAt > 100e3){ tokAt = Date.now(); tokP = pb.files.getToken().catch(e => { tokP = null; throw e; }); }
@@ -1488,119 +1479,20 @@ async function savePhoto(kind, rec, ph){
   } catch(e){ toast(errText(e)); }
 }
 const photoAction = (kind, rec) => askPhoto(kind, rec).then(ph => savePhoto(kind, rec, ph));
-function fileRow(f){
-  const ext = (f.ext || String(f.name || '').split('.').pop() || '').slice(0, 4);
-  const meta = [f.size ? fsize(f.size) : '', fmtDay(createdISO(f))].filter(Boolean).join(' · ');
-  const id = esc(f.id);
-  const name = viewKind(f) ? `<button type="button" class="fname" data-act="view-file" data-id="${id}">${esc(f.name)}</button>` : `<b>${esc(f.name)}</b>`;
-  return `<div class="file"><span class="file-ext">${esc(ext)}</span><div class="file-main">${name}<span>${meta}</span></div>
-    <button type="button" class="icon-btn" data-act="dl-file" data-id="${id}" aria-label="Скачать ${esc(f.name)}">${ICON.dl}</button>
-    <button type="button" class="icon-btn" data-act="del-file" data-id="${id}" aria-label="Удалить ${esc(f.name)}">${ICON.trash}</button></div>`;
-}
-async function uploadFile(file, needId){
-  const ext = (file.name.split('.').pop() || '').toLowerCase();
-  if(!FILE_EXT.includes(ext)) throw new Error(`Формат .${ext || '?'} не подходит. Можно PDF, Word (doc, docx) и картинки.`);
-  if(file.size > MAX_FILE) throw new Error(`«${file.name}» больше 20 МБ.`);
-  const rec = await pb.collection('need_files').create({id: newId(), owner: me().id, need: needId, name: file.name, ext, file});
-  upsert('files', rec);
-}
-function viewKind(f){
-  const ext = String(f.ext || String(f.name || '').split('.').pop() || '').toLowerCase();
-  if(ext === 'pdf') return 'pdf';
-  if(ext === 'docx') return 'docx';
-  if(['png','jpg','jpeg','gif','webp'].includes(ext)) return 'img';
-  return '';
-}
-async function fileUrl(f, download){
-  const q = {token: await fileToken()};
-  if(download) q.download = 1;
-  return pb.files.getURL(f, f.file, q);
-}
-async function getBlob(f){
-  const res = await fetch(await fileUrl(f));
-  if(!res.ok) throw new Error('Файл не найден на сервере.');
-  return await res.blob();
-}
-const libs = {};
-function loadLib(src, global){
-  if(window[global]) return Promise.resolve(window[global]);
-  if(!libs[src]) libs[src] = new Promise((res, rej) => {
-    const sc = document.createElement('script');
-    sc.src = src;
-    sc.onload = () => window[global] ? res(window[global]) : rej(new Error('Модуль не загрузился.'));
-    sc.onerror = () => { delete libs[src]; rej(new Error('Не удалось загрузить модуль. Проверьте интернет.')); };
-    document.head.appendChild(sc);
-  });
-  return libs[src];
-}
 const viewer = $('#viewer');
 let viewing = null, viewDl = null;
-let pdfView = null; // открытый PDF: документ и наблюдатель за страницами
-function closePdf(){ if(pdfView){ pdfView.obs.disconnect(); pdfView.doc.destroy(); pdfView = null; } $('#v-body').className = 'v-body'; }
 $('#v-close').addEventListener('click', () => viewer.close());
 $('#v-dl').addEventListener('click', () => viewDl && viewDl());
-viewer.addEventListener('close', () => { viewing = null; viewDl = null; closePdf(); $('#v-body').innerHTML = ''; });
-// PDF показываем сами через pdf.js: сервер отдаёт файлы с CSP sandbox, и встроенный
-// просмотрщик Chrome в новой вкладке не запускается (пустая вкладка и скачивание).
-async function loadPdfJs(){
-  const lib = await import('/vendor/pdfjs/pdf.min.mjs');
-  lib.GlobalWorkerOptions.workerSrc = '/vendor/pdfjs/pdf.worker.min.mjs';
-  return lib;
-}
-async function showPdf(f, body){
-  const [lib, blob] = await Promise.all([loadPdfJs(), getBlob(f)]);
-  const doc = await lib.getDocument({data: new Uint8Array(await blob.arrayBuffer()), standardFontDataUrl: '/vendor/pdfjs/standard_fonts/', cMapUrl: '/vendor/pdfjs/cmaps/', cMapPacked: true}).promise;
-  if(viewing !== f){ doc.destroy(); return; }
-  const first = (await doc.getPage(1)).getViewport({scale: 1});
-  body.classList.add('is-pdf');
-  body.innerHTML = Array.from({length: doc.numPages}, (_, n) => `<div class="pdf-page" data-n="${n + 1}" style="aspect-ratio:${first.width}/${first.height}"><span>${n + 1}</span></div>`).join('');
-  // Страницы рисуются, когда до них доходит прокрутка: большой файл не съест память телефона
-  const draw = async el => {
-    const page = await doc.getPage(+el.dataset.n);
-    const vp1 = page.getViewport({scale: 1});
-    const ratio = Math.min(window.devicePixelRatio || 1, 2);
-    const vp = page.getViewport({scale: el.clientWidth / vp1.width * ratio});
-    const cv = document.createElement('canvas');
-    cv.width = Math.floor(vp.width); cv.height = Math.floor(vp.height);
-    el.style.aspectRatio = `${vp1.width}/${vp1.height}`;
-    await page.render({canvasContext: cv.getContext('2d'), viewport: vp}).promise;
-    el.replaceChildren(cv);
-  };
-  const obs = new IntersectionObserver(entries => entries.forEach(e => {
-    if(!e.isIntersecting) return;
-    obs.unobserve(e.target);
-    draw(e.target).catch(() => { e.target.textContent = 'Страница не открылась'; });
-  }), {root: body, rootMargin: '600px 0px'});
-  pdfView = {doc, obs};
-  body.querySelectorAll('.pdf-page').forEach(el => obs.observe(el));
-}
+viewer.addEventListener('close', () => { viewing = null; viewDl = null; const b = $('#v-body'); b.className = 'v-body'; b.innerHTML = ''; });
+// Окно просмотра: фото нужды целиком
 function startView(title, item, dl){
-  closePdf();
   viewing = item; viewDl = dl;
   $('#v-title').textContent = title;
   const body = $('#v-body');
+  body.className = 'v-body';
   body.innerHTML = '<div class="v-msg">Открываю…</div>';
   if(!viewer.open) viewer.showModal();
   return body;
-}
-async function openFile(f){
-  const kind = viewKind(f);
-  const body = startView(f.name, f, () => downloadFile(f));
-  try{
-    if(kind === 'pdf'){ await showPdf(f, body); return; }
-    if(kind === 'img'){ const url = URL.createObjectURL(await getBlob(f)); if(viewing === f){ body.classList.add('is-img'); body.innerHTML = `<img class="v-img" src="${esc(url)}" alt="${esc(f.name)}">`; } return; }
-    if(kind === 'docx'){
-      const [m, blob] = await Promise.all([loadLib('/vendor/mammoth.browser.min.js', 'mammoth'), getBlob(f)]);
-      const r = await m.convertToHtml({arrayBuffer: await blob.arrayBuffer()});
-      if(viewing !== f) return;
-      const html = (r.value || '').replace(/<script[\s\S]*?<\/script>/gi, '').replace(/\son\w+\s*=/gi, ' data-x=');
-      body.innerHTML = html.trim() ? `<article class="doc-view">${html}</article>` : '<div class="v-msg">Документ пустой.</div>';
-      return;
-    }
-    body.innerHTML = '<div class="v-msg">Этот формат здесь не просматривается. Скачайте файл и откройте его на устройстве.</div>';
-  }catch(e){
-    if(viewing === f) body.innerHTML = `<div class="v-msg">${esc(errText(e))}<span>Попробуйте скачать файл кнопкой вверху.</span></div>`;
-  }
 }
 async function openPhoto(n){
   const body = startView(n.title, n, async () => { try { downloadUrl(pb.files.getURL(n, n.photo, {token: await fileToken(), download: 1}), n.photo); } catch(e){ toast(errText(e)); } });
@@ -1616,7 +1508,6 @@ function downloadUrl(url, name){
   a.href = url; a.download = name || 'file'; a.rel = 'noopener';
   document.body.appendChild(a); a.click(); a.remove();
 }
-async function downloadFile(f){ try { downloadUrl(await fileUrl(f, true), f.name); } catch(e){ toast(errText(e)); } }
 
 /* ---------- Диалог с формой ---------- */
 const dlg = $('#dlg'), form = $('#dlg-form');
@@ -1714,7 +1605,7 @@ function arm(btn, text){
   setTimeout(() => { if(btn.isConnected){ btn.dataset.armed = ''; btn.textContent = old; } }, 3500);
   return false;
 }
-const FIELD_RU = {email:'почта', password:'пароль', passwordConfirm:'повтор пароля', oldPassword:'текущий пароль', name:'название', title:'название', text:'текст', file:'файл', photo:'фото', date:'дата', code:'код'};
+const FIELD_RU = {email:'почта', password:'пароль', passwordConfirm:'повтор пароля', oldPassword:'текущий пароль', name:'название', title:'название', text:'текст', photo:'фото', date:'дата', code:'код'};
 function errText(e){
   if(!e) return 'Неизвестная ошибка.';
   if(e.isAbort) return 'Запрос прерван.';
@@ -1730,7 +1621,6 @@ function errText(e){
     if(data.passwordConfirm) return 'Пароли не совпадают.';
     if(data.oldPassword) return 'Текущий пароль введён неверно.';
     if(data.photo) return 'Фото не принято: подходят JPG, PNG, WEBP и HEIC до 10 МБ.';
-    if(data.file) return 'Файл не принят: проверьте формат и размер (до 20 МБ).';
     return 'Проверьте поля: ' + keys.map(k => FIELD_RU[k] || k).join(', ') + '.';
   }
   if(e.status === 401 || e.status === 403) return 'Нет доступа. Войдите заново.';
@@ -1777,12 +1667,12 @@ function openMoveNeed(n){
     async onSave(v){ if(v.section !== n.section){ await col('needs').doc(n.id).update({section: v.section}); toast('Нужда перенесена'); } }});
 }
 function confirmDeleteNeed(n){
-  const p = S.prayers.filter(x => x.need === n.id).length, f = S.files.filter(x => x.need === n.id).length;
+  const p = S.prayers.filter(x => x.need === n.id).length;
   const gs = linksOfNeed(n.id).length ? ' Она пропадёт и из групп.' : '';
-  openForm({title: 'Удалить нужду?', text: `«${n.title}» удалится вместе с записями молитв (${p}) и файлами (${f}). Вернуть их будет нельзя.${gs}`, submit: 'Удалить', danger: true,
+  openForm({title: 'Удалить нужду?', text: `«${n.title}» удалится вместе с записями молитв (${p}). Вернуть их будет нельзя.${gs}`, submit: 'Удалить', danger: true,
     async onSave(){
       await col('needs').doc(n.id).delete();
-      S.prayers = S.prayers.filter(x => x.need !== n.id); S.files = S.files.filter(x => x.need !== n.id); S.glinks = S.glinks.filter(x => x.need !== n.id);
+      S.prayers = S.prayers.filter(x => x.need !== n.id); S.glinks = S.glinks.filter(x => x.need !== n.id);
       toast('Нужда удалена'); go('#/s/' + n.section, true);
     }});
 }
@@ -2081,14 +1971,6 @@ document.addEventListener('click', async e => {
       } catch(err){ toast(errText(err)); a.disabled = false; }
       break;
     }
-    case 'view-file': { const f = byId('files', d.id); if(f) openFile(f); break; }
-    case 'dl-file': { const f = byId('files', d.id); if(f) downloadFile(f); break; }
-    case 'del-file': {
-      const f = byId('files', d.id); if(!f) return;
-      openForm({title: 'Удалить файл?', text: `«${f.name}» удалится без возможности вернуть.`, submit: 'Удалить', danger: true,
-        async onSave(){ await col('files').doc(f.id).delete(); toast('Файл удалён'); }});
-      break;
-    }
     case 'pick-color': {
       const f = UI.form; if(!f) return;
       f.name = $('#f-name').value; f.color = d.color;
@@ -2126,16 +2008,6 @@ document.addEventListener('change', async e => {
     if(PL.el && PL.el.duration){ PL.el.currentTime = Math.min(+t.value, PL.el.duration - 0.2); plTick(); savePos(true); }
     return;
   }
-  if(t.id === 'nf-input'){
-    const list = [...t.files]; t.value = '';
-    const n = byId('needs', route().id); if(!n) return;
-    UI.filesOpen = true;
-    for(const file of list){
-      toast(`Загружаю «${file.name}»…`);
-      try { await uploadFile(file, n.id); toast('Файл прикреплён'); }
-      catch(err){ toast(errText(err)); }
-    }
-  }
 });
 document.addEventListener('input', e => {
   if(e.target.id === 'f-name' && UI.form){ UI.form.name = e.target.value; $('#pv-name').textContent = e.target.value.trim() || 'Название'; }
@@ -2146,7 +2018,6 @@ document.addEventListener('input', e => {
   }
 });
 document.addEventListener('toggle', e => {
-  if(e.target.id === 'files-fold') UI.filesOpen = e.target.open;
   if(e.target.id === 'arch-fold') UI.archOpen = e.target.open;
 }, true);
 

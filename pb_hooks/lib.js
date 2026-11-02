@@ -7,10 +7,10 @@ function quotaBytes() {
   return (parseInt($os.getenv("USER_QUOTA_MB"), 10) || 250) * MB;
 }
 
-// Сколько места уже заняли файлы нужд и фото нужд и подразделов пользователя.
+// Сколько места уже заняли фото нужд и подразделов пользователя (файлов у нужд с правок 2.4 нет).
 // Запись exceptId из коллекции exceptCol не считается: её размер сейчас пересчитывается.
 function usedBytes(ownerId, exceptCol, exceptId) {
-  const parts = [["need_files", "size"], ["needs", "photo_size"], ["sections", "photo_size"]];
+  const parts = [["needs", "photo_size"], ["sections", "photo_size"]];
   let total = 0;
   for (let i = 0; i < parts.length; i++) {
     const col = parts[i][0];
@@ -27,7 +27,7 @@ function usedBytes(ownerId, exceptCol, exceptId) {
 function checkQuota(ownerId, add, exceptCol, exceptId) {
   if (usedBytes(ownerId, exceptCol, exceptId) + add > quotaBytes()) {
     const mb = Math.round(quotaBytes() / MB);
-    throw new BadRequestError(`Место для фото и файлов закончилось: на одного пользователя ${mb} МБ. Удалите ненужные файлы.`);
+    throw new BadRequestError(`Место для фото закончилось: на одного пользователя ${mb} МБ. Удалите ненужные фото.`);
   }
 }
 
@@ -113,8 +113,6 @@ function checkSection(e) {
   checkSectionDepth(e);
   recordPhoto(e, "sections");
 }
-
-const FILE_EXT = ["pdf", "doc", "docx", "jpg", "jpeg", "png", "gif", "webp", "heic", "heif"];
 
 /* ---------- Группы ---------- */
 const MAX_MEMBERS = 20; // участников в группе
@@ -474,7 +472,7 @@ function deleteMedia(name) {
 }
 
 module.exports = {
-  MB, quotaBytes, usedBytes, checkQuota, checkSectionDepth, checkSection, recordPhoto, checkDayDate, addDefaultVerse, FILE_EXT,
+  MB, quotaBytes, usedBytes, checkQuota, checkSectionDepth, checkSection, recordPhoto, checkDayDate, addDefaultVerse,
   MAX_MEMBERS, MAX_GROUPS, newGroupCode, groupByCode, isMember, memberGroup, ownGroup, checkGroupLimit, addMember, removeMember, handOverGroups, checkQuery,
   checkGroupDate, markGroupDay, unmarkGroupDay,
   MAIL_PER_DAY, mailAllowed, mailPolish, durationText, alertInfo,

@@ -94,7 +94,7 @@ onRecordCreateRequest((e) => {
   e.next();
 }, "verses");
 
-// Фото нужды (исходник и круглый вариант): размер считает сервер, общий объём фото и файлов на пользователя ограничен.
+// Фото нужды (исходник и круглый вариант): размер считает сервер, общий объём фото на пользователя ограничен.
 // «Поделиться ответом с группой» возможно только у отвеченной нужды: снятие «Отвечено» сбрасывает настройку.
 onRecordCreateRequest((e) => {
   if (!e.hasSuperuserAuth() && e.auth) require(`${__hooks}/lib.js`).recordPhoto(e, "needs");
@@ -110,33 +110,6 @@ onRecordUpdateRequest((e) => {
 // Отметки дней: только за сегодня, вчера и позавчера.
 onRecordCreateRequest((e) => { if (!e.hasSuperuserAuth()) require(`${__hooks}/lib.js`).checkDayDate(e.record.getString("date")); e.next(); }, "prayer_days");
 onRecordDeleteRequest((e) => { if (!e.hasSuperuserAuth()) require(`${__hooks}/lib.js`).checkDayDate(e.record.getString("date")); e.next(); }, "prayer_days");
-
-// Файлы нужды: только pdf, doc, docx и картинки; размер считает сервер.
-onRecordCreateRequest((e) => {
-  if (e.hasSuperuserAuth() || !e.auth) {
-    e.next();
-    return;
-  }
-  const lib = require(`${__hooks}/lib.js`);
-  const files = e.record.getUnsavedFiles("file");
-  let add = 0;
-  for (const f of files) {
-    const ext = String(f.originalName || "").split(".").pop().toLowerCase();
-    if (lib.FILE_EXT.indexOf(ext) < 0) throw new BadRequestError("Можно прикреплять только PDF, Word (doc, docx) и картинки.");
-    add += f.size;
-  }
-  lib.checkQuota(e.auth.id, add, "", "");
-  e.record.set("size", add);
-  e.next();
-}, "need_files");
-
-// Размер файла после создания менять нельзя.
-onRecordUpdateRequest((e) => {
-  if (!e.hasSuperuserAuth()) {
-    e.record.set("size", e.record.original().getInt("size"));
-  }
-  e.next();
-}, "need_files");
 
 /* ---------- Материалы (правки 2.3) ---------- */
 // Материалы ведёт суперпользователь в панели /_/ (правила коллекции закрыты для обычного API).
@@ -327,7 +300,7 @@ routerAdd("GET", "/api/molitva/setup", (e) => {
   });
 });
 
-// Сколько места заняли фото и файлы пользователя.
+// Сколько места заняли фото пользователя (нужды и подразделы).
 routerAdd("GET", "/api/molitva/usage", (e) => {
   const lib = require(`${__hooks}/lib.js`);
   return e.json(200, { used: lib.usedBytes(e.auth.id, "", ""), quota: lib.quotaBytes() });
