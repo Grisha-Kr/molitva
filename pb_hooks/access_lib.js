@@ -40,6 +40,18 @@ function contact() { return ($os.getenv("CONTACT_EMAIL") || "").trim() || "ад�
 function message() {
   return "Доступ приостановлен: можно смотреть записи, а добавлять и менять нельзя. Чтобы продлить доступ, напишите: " + contact() + ".";
 }
+// Материалы без доступа закрыты целиком: список, отдельный материал, обложки, ссылки на аудио и видео
+function materialsMessage() {
+  return "Материалы доступны при действующем доступе. Чтобы продлить, напишите: " + contact() + ".";
+}
+function userActive(userId) {
+  let u = null;
+  try { u = $app.findRecordById("users", String(userId || "")); } catch (_) {}
+  return !!u && state(u).active;
+}
+function requireMaterials(userId) {
+  if (!userActive(userId)) throw new ForbiddenError(materialsMessage());
+}
 const isUser = (e) => !!(e.auth && e.auth.collection().name === "users");
 // Для обработчиков создания, изменения и удаления записей и для своих маршрутов, которые что-то меняют
 function guard(e) {
@@ -166,4 +178,10 @@ function myAccess(e) {
   return e.json(200, { active: st.active, reason: st.reason, until: st.until, suspended: st.suspended, admin: st.admin, today: st.today, contact: contact() });
 }
 
-module.exports = { today, addMonths, state, guard, guardProfile, message, untilFor, PERIODS, checkInvite, adminUsers, adminAccess, adminAvatar, myAccess };
+// Для хуков списка и просмотра materials и скачивания обложек
+function guardMaterials(e) {
+  if (e.hasSuperuserAuth() || !isUser(e)) return;
+  if (!state(e.auth).active) throw new ForbiddenError(materialsMessage());
+}
+
+module.exports = { materialsMessage, userActive, requireMaterials, guardMaterials, today, addMonths, state, guard, guardProfile, message, untilFor, PERIODS, checkInvite, adminUsers, adminAccess, adminAvatar, myAccess };

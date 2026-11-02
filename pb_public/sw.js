@@ -2,8 +2,8 @@
 // Данные (/api/) никогда не кэшируются. Материалы (их список, обложки, аудио и видео) идут
 // только через /api/, поэтому на устройстве от них ничего не остаётся: без интернета
 // вкладка «Материалы» показывает сообщение, что нужно подключение.
-const VERSION = 'molitva-v8';
-const SHELL = ['/', '/index.html', '/app.css?v=8', '/app.js?v=8', '/vendor/pocketbase.umd.js', '/manifest.webmanifest', '/icons/icon-192.png?v=2', '/img/stone.webp', '/img/water.webp', '/img/wave-mask.svg'];
+const VERSION = 'molitva-v9';
+const SHELL = ['/', '/index.html', '/app.css?v=9', '/app.js?v=9', '/vendor/pocketbase.umd.js', '/manifest.webmanifest', '/icons/icon-192.png?v=2', '/img/stone.webp', '/img/water.webp', '/img/wave-mask.svg'];
 
 self.addEventListener('install', e => {
   e.waitUntil(caches.open(VERSION).then(c => c.addAll(SHELL)).then(() => self.skipWaiting()));

@@ -17,6 +17,31 @@ onRecordDeleteRequest((e) => { require(`${__hooks}/access_lib.js`).guard(e); e.n
 // Свой профиль: без доступа нельзя менять имя, фото и период стиха; пароль и тему можно.
 onRecordUpdateRequest((e) => { require(`${__hooks}/access_lib.js`).guardProfile(e); e.next(); }, "users");
 
+// Материалы без доступа закрыты целиком: список, отдельный материал, обложки и живые обновления.
+// Ссылки на аудио и видео закрывают маршруты в main.pb.js (requireMaterials).
+onRecordsListRequest((e) => { require(`${__hooks}/access_lib.js`).guardMaterials(e); e.next(); }, "materials");
+onRecordViewRequest((e) => { require(`${__hooks}/access_lib.js`).guardMaterials(e); e.next(); }, "materials");
+onFileDownloadRequest((e) => {
+  const lib = require(`${__hooks}/access_lib.js`);
+  if (!e.hasSuperuserAuth()) {
+    let auth = e.auth;
+    if (!auth) {
+      const token = String((e.requestInfo().query || {}).token || "");
+      try { auth = token ? $app.findAuthRecordByToken(token, "file") : null; } catch (_) { auth = null; }
+    }
+    if (auth && auth.collection().name === "users") lib.requireMaterials(auth.id);
+  }
+  e.next();
+}, "materials");
+onRealtimeMessageSend((e) => {
+  const name = String(e.message.name || "");
+  if (name.indexOf("materials/") === 0) {
+    const auth = e.client.get("auth");
+    if (auth && auth.collection && auth.collection().name === "users" && !require(`${__hooks}/access_lib.js`).userActive(auth.id)) return;
+  }
+  e.next();
+});
+
 // Срок доступа в приглашении: только из списка
 onRecordCreateRequest((e) => { require(`${__hooks}/access_lib.js`).checkInvite(e); e.next(); }, "invites");
 onRecordUpdateRequest((e) => { require(`${__hooks}/access_lib.js`).checkInvite(e); e.next(); }, "invites");

@@ -73,11 +73,11 @@ onRecordCreateRequest((e) => {
 
 // Разделы: глубина не больше двух (раздел на главной и подраздел внутри него).
 // Фото подраздела: размер считает сервер, он входит в лимит места.
-onRecordCreateRequest((e) => { if (!e.hasSuperuserAuth() && e.auth) require(`${__hooks}/lib.js`).checkSection(e); e.next(); }, "sections");
-onRecordUpdateRequest((e) => { if (!e.hasSuperuserAuth() && e.auth) require(`${__hooks}/lib.js`).checkSection(e); e.next(); }, "sections");
+onRecordCreateRequest((e) => { require(`${__hooks}/access_lib.js`).guard(e); if (!e.hasSuperuserAuth() && e.auth) require(`${__hooks}/lib.js`).checkSection(e); e.next(); }, "sections");
+onRecordUpdateRequest((e) => { require(`${__hooks}/access_lib.js`).guard(e); if (!e.hasSuperuserAuth() && e.auth) require(`${__hooks}/lib.js`).checkSection(e); e.next(); }, "sections");
 
 // Удалить можно только пустой раздел: без подразделов и нужд.
-onRecordDeleteRequest((e) => {
+onRecordDeleteRequest((e) => { require(`${__hooks}/access_lib.js`).guard(e);
   if (!e.hasSuperuserAuth()) {
     const subs = $app.countRecords("sections", $dbx.hashExp({ parent: e.record.id }));
     const needs = $app.countRecords("needs", $dbx.hashExp({ section: e.record.id }));
@@ -89,7 +89,7 @@ onRecordDeleteRequest((e) => {
 }, "sections");
 
 // Стихов не больше 7 у одного пользователя.
-onRecordCreateRequest((e) => {
+onRecordCreateRequest((e) => { require(`${__hooks}/access_lib.js`).guard(e);
   if (!e.hasSuperuserAuth() && e.auth) {
     if ($app.countRecords("verses", $dbx.hashExp({ owner: e.auth.id })) >= 7) {
       throw new BadRequestError("Можно вписать не больше 7 стихов. Удалите или измените один из старых.");
@@ -100,20 +100,20 @@ onRecordCreateRequest((e) => {
 
 // Фото нужды (исходник и круглый вариант): размер считает сервер, общий объём фото на пользователя ограничен.
 // «Поделиться ответом с группой» возможно только у отвеченной нужды: снятие «Отвечено» сбрасывает настройку.
-onRecordCreateRequest((e) => {
+onRecordCreateRequest((e) => { require(`${__hooks}/access_lib.js`).guard(e);
   if (!e.hasSuperuserAuth() && e.auth) require(`${__hooks}/lib.js`).recordPhoto(e, "needs");
   if (!e.record.getString("answered_at")) e.record.set("answer_shared", false);
   e.next();
 }, "needs");
-onRecordUpdateRequest((e) => {
+onRecordUpdateRequest((e) => { require(`${__hooks}/access_lib.js`).guard(e);
   if (!e.hasSuperuserAuth() && e.auth) require(`${__hooks}/lib.js`).recordPhoto(e, "needs");
   if (!e.record.getString("answered_at")) e.record.set("answer_shared", false);
   e.next();
 }, "needs");
 
 // Отметки дней: только за сегодня, вчера и позавчера.
-onRecordCreateRequest((e) => { if (!e.hasSuperuserAuth()) require(`${__hooks}/lib.js`).checkDayDate(e.record.getString("date")); e.next(); }, "prayer_days");
-onRecordDeleteRequest((e) => { if (!e.hasSuperuserAuth()) require(`${__hooks}/lib.js`).checkDayDate(e.record.getString("date")); e.next(); }, "prayer_days");
+onRecordCreateRequest((e) => { require(`${__hooks}/access_lib.js`).guard(e); if (!e.hasSuperuserAuth()) require(`${__hooks}/lib.js`).checkDayDate(e.record.getString("date")); e.next(); }, "prayer_days");
+onRecordDeleteRequest((e) => { require(`${__hooks}/access_lib.js`).guard(e); if (!e.hasSuperuserAuth()) require(`${__hooks}/lib.js`).checkDayDate(e.record.getString("date")); e.next(); }, "prayer_days");
 
 /* ---------- Материалы (правки 2.3) ---------- */
 // Материалы ведёт суперпользователь в панели /_/ (правила коллекции закрыты для обычного API).
@@ -135,7 +135,7 @@ onRecordUpdateRequest((e) => {
 
 // Своя отметка о материале: закреплено, в архиве, когда открыл, где остановился.
 // Переносить отметку на другой материал или на другого человека нельзя.
-onRecordUpdateRequest((e) => {
+onRecordUpdateRequest((e) => { require(`${__hooks}/access_lib.js`).guard(e);
   if (!e.hasSuperuserAuth()) require(`${__hooks}/lib.js`).checkMaterialMark(e);
   e.next();
 }, "material_marks");
@@ -151,6 +151,7 @@ onRecordAfterDeleteSuccess((e) => {
 // которую этот же ответ ставит вошедшему человеку (см. setMediaCookie в lib.js).
 routerAdd("GET", "/api/molitva/materials/{id}/media-link", (e) => {
   const lib = require(`${__hooks}/lib.js`);
+  require(`${__hooks}/access_lib.js`).requireMaterials(e.auth.id);
   const m = lib.visibleMaterial(e.auth.id, e.request.pathValue("id"));
   if (!m.getString("media")) throw new NotFoundError("У этого материала ещё нет файла.");
   return e.json(200, { url: lib.mediaLink(e, m.id, e.auth.id), ttl: lib.MEDIA_TTL });
@@ -162,6 +163,7 @@ routerAdd("GET", "/api/molitva/media/{id}", (e) => {
   const lib = require(`${__hooks}/lib.js`);
   const id = e.request.pathValue("id");
   const userId = lib.mediaUser(e, id);
+  require(`${__hooks}/access_lib.js`).requireMaterials(userId); // ссылку выдали раньше, а доступ с тех пор закрылся
   const m = lib.visibleMaterial(userId, id);
   const name = m.getString("media");
   if (!name) throw new NotFoundError("У этого материала ещё нет файла.");
@@ -362,7 +364,7 @@ onRealtimeSubscribeRequest((e) => {
 
 // Переименовать группу: создатель меняет через обычный API только название.
 // Создатель, код ссылки и участники меняются только маршрутами ниже.
-onRecordUpdateRequest((e) => {
+onRecordUpdateRequest((e) => { require(`${__hooks}/access_lib.js`).guard(e);
   if (!e.hasSuperuserAuth()) {
     const o = e.record.original();
     e.record.set("owner", o.getString("owner"));
@@ -375,7 +377,7 @@ onRecordUpdateRequest((e) => {
 }, "groups");
 
 // Поделиться нуждой: только своей (проверяет правило) и только в группу, где вы участник.
-onRecordCreateRequest((e) => {
+onRecordCreateRequest((e) => { require(`${__hooks}/access_lib.js`).guard(e);
   if (!e.hasSuperuserAuth()) {
     const lib = require(`${__hooks}/lib.js`);
     const groupId = e.record.getString("group");
@@ -391,7 +393,7 @@ onRecordCreateRequest((e) => {
 // «Помолился» у общей нужды: только за сегодня, только участник группы, где лежит нужда, и не у отвеченной нужды.
 // Группу и участника записывает сервер, он же ставит день молитвы в группе (group_days).
 // Личный дневник (prayer_days, last_prayed_at у нужды) эта отметка не трогает.
-onRecordCreateRequest((e) => {
+onRecordCreateRequest((e) => { require(`${__hooks}/access_lib.js`).guard(e);
   const lib = require(`${__hooks}/lib.js`);
   if (!e.hasSuperuserAuth()) {
     const date = e.record.getString("date");
@@ -415,7 +417,7 @@ onRecordCreateRequest((e) => {
 }, "group_praying");
 
 // Снять можно только свою отметку (правило) и только за сегодня. Последняя снятая отметка дня снимает и день в группе.
-onRecordDeleteRequest((e) => {
+onRecordDeleteRequest((e) => { require(`${__hooks}/access_lib.js`).guard(e);
   const lib = require(`${__hooks}/lib.js`);
   if (!e.hasSuperuserAuth()) lib.checkGroupDate(e.record.getString("date"));
   e.next();
@@ -430,7 +432,7 @@ onRecordDelete((e) => {
 
 const GROUP_AUTH = $apis.requireAuth("users");
 // Маршруты, которые что-то меняют, без доступа закрыты (guard из access_lib.js): создать группу, вступить,
-// новая ссылка, передать роль, исключить. Выход из группы открыт всегда.
+// новая ссылка, исключить. Передать роль создателя и выйти из группы можно всегда.
 
 // Создать группу: создатель сразу становится участником.
 routerAdd("POST", "/api/molitva/groups", (e) => {
@@ -491,8 +493,8 @@ routerAdd("POST", "/api/molitva/groups/{id}/link", (e) => {
 }, GROUP_AUTH);
 
 // Передать роль создателя другому участнику.
+// Без доступа открыт: создатель передаёт роль, чтобы потом выйти из группы.
 routerAdd("POST", "/api/molitva/groups/{id}/owner", (e) => {
-  require(`${__hooks}/access_lib.js`).guard(e);
   const lib = require(`${__hooks}/lib.js`);
   const g = lib.ownGroup($app, e.request.pathValue("id"), e.auth.id);
   const user = String((e.requestInfo().body || {}).user || "");

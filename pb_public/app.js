@@ -168,7 +168,11 @@ function col(key){
 const LIST_FILTER = {needs: () => pb.filter('owner = {:me}', {me: me().id}), shared: () => pb.filter('owner != {:me}', {me: me().id}),
   gpray: () => pb.filter('date >= {:d}', {d: addDays(todayISO(), -1)}), gdays: () => pb.filter('date >= {:d}', {d: weekStart()})};
 async function loadAll(keys = KEYS){
-  const res = await Promise.all(keys.map(k => pb.collection(PBN[k]).getFullList({batch: 500, ...(LIST_FILTER[k] ? {filter: LIST_FILTER[k]()} : {})})));
+  const res = await Promise.all(keys.map(k => {
+    const p = pb.collection(PBN[k]).getFullList({batch: 500, ...(LIST_FILTER[k] ? {filter: LIST_FILTER[k]()} : {})});
+    // без доступа сервер материалы не отдаёт (403): остальное загружается как обычно
+    return k === 'materials' ? p.catch(e => { if(e && e.status === 403) return []; throw e; }) : p;
+  }));
   keys.forEach((k, n) => { S[k] = res[n]; });
   schedule();
 }
@@ -262,10 +266,18 @@ const daysLeft = a => Math.round(dnum(a.until) - dnum(a.today));
 const leftText = k => k <= 0 ? 'сегодня последний день' : `осталось ${k} ${plural(k, DAYS)}`;
 async function loadAccess(){
   if(!pb.authStore.isValid) return;
+  const was = readOnly();
   try { S.access = await pb.send('/api/molitva/access', {}); } catch(e){ return; }
   renderAccessBar();
+  if(was !== readOnly()){
+    // доступ закрылся: материалы убираем с экрана; открылся: загружаем их заново
+    if(readOnly()) S.materials = []; else if(S.loaded) loadAll(['materials']).catch(() => {});
+    if(S.loaded) render(true);
+  }
   schedule();
 }
+// Без доступа вкладка «Материалы» закрыта целиком
+const matClosed = () => `<section class="card"><p class="empty">Материалы доступны при действующем доступе. Чтобы продлить, напишите: ${contactHTML(S.access && S.access.contact)}</p></section>`;
 const accKey = a => [me().id, a.reason, a.until].join('|');
 function renderAccessBar(){
   const a = S.access, bar = $('#access-bar');
@@ -820,9 +832,10 @@ function openInvite(g){
     }});
 }
 function openMembers(g){
-  const own = isOwner(g) && !readOnly();
+  // без доступа создатель может только передать роль, чтобы потом выйти из группы
+  const ro = readOnly(), own = isOwner(g) && !ro;
   const rows = membersOf(g.id).map(m => {
-    const acts = own && m.user !== me().id ? `<div class="mb-acts"><button type="button" class="btn sm" data-dlg="owner" data-id="${esc(m.user)}">Сделать создателем</button><button type="button" class="btn sm ghost danger" data-dlg="kick" data-id="${esc(m.user)}">Исключить</button></div>` : '';
+    const acts = isOwner(g) && m.user !== me().id ? `<div class="mb-acts"><button type="button" class="btn sm" data-dlg="owner" data-id="${esc(m.user)}">Сделать создателем</button>${ro ? '' : `<button type="button" class="btn sm ghost danger" data-dlg="kick" data-id="${esc(m.user)}">Исключить</button>`}</div>` : '';
     return personRow(m.user, (m.user === g.owner ? '<span class="pill">создатель</span>' : '') + acts);
   }).join('');
   openForm({title: 'Участники', text: own ? 'Если исключить участника, его нужды пропадут из группы, а его отметки молитвы в ней удалятся.' : '',
@@ -855,9 +868,7 @@ function openNewLink(g){
 function leaveGroup(g){
   const own = isOwner(g);
   if(own && membersOf(g.id).length > 1){
-    info('Сначала передайте роль создателя', readOnly()
-      ? 'Создатель не может выйти, пока в группе есть другие участники, а передать роль создателя без доступа нельзя. ' + accessLine().replace(/<[^>]+>/g, '')
-      : 'Создатель не может просто выйти из группы. Откройте «Участники» и нажмите «Сделать создателем» рядом с тем, кто будет вести группу. После этого можно выйти.');
+    info('Сначала передайте роль создателя', 'Создатель не может просто выйти из группы. Откройте «Участники» и нажмите «Сделать создателем» рядом с тем, кто будет вести группу. После этого можно выйти.');
     return;
   }
   openForm({title: 'Выйти из группы?', submit: 'Выйти', danger: true,
@@ -969,6 +980,7 @@ function vMaterials(){
   const head = '<header class="head"><h1>Материалы</h1></header>';
   // ничего из материалов не хранится на устройстве, поэтому без интернета вкладка пустая
   if(!navigator.onLine) return head + '<section class="card"><p class="empty">Материалы открываются только при подключении к интернету.</p></section>';
+  if(readOnly()) return head + matClosed();
   const all = [...S.materials].sort(matSort);
   const state = m => { const k = markOf(m.id); return k && k.archived ? 'arch' : k && k.pinned ? 'pin' : 'rest'; };
   const pin = all.filter(m => state(m) === 'pin'), rest = all.filter(m => state(m) === 'rest'), arch = all.filter(m => state(m) === 'arch');
@@ -986,6 +998,7 @@ function vMaterials(){
 }
 
 function vMaterial(r){
+  if(readOnly()) return `<div class="nav-head">${backLink('#/materials', 'Материалы')}</div>` + matClosed();
   const m = byId('materials', r.id);
   if(!m) return `<div class="nav-head">${backLink('#/materials', 'Материалы')}</div>
     <div class="card"><p>Материал не найден: возможно, его убрали.</p><a class="btn" href="#/materials">К материалам</a></div>`;
