@@ -62,14 +62,16 @@ const ICON = {
 
 /* ---------- Состояние ---------- */
 const S = {sections:[], needs:[], prayers:[], verses:[], days:[], daily:[], invites:[], usage:null, loaded:false,
-  groups:[], gmembers:[], glinks:[], gpray:[], gdays:[], people:[], shared:[], materials:[], marks:[], mediaUsage:null};
+  groups:[], gmembers:[], glinks:[], gpray:[], gdays:[], people:[], shared:[], materials:[], marks:[], mediaUsage:null, access:null, adminUsers:null};
 const loadLS = (k, d) => { try { const v = localStorage.getItem('mol_'+k); return v == null ? d : JSON.parse(v); } catch(e){ return d; } };
 const saveLS = (k, v) => { try { localStorage.setItem('mol_'+k, JSON.stringify(v)); } catch(e){} };
-const UI = {reorder:'', form:null, hops:0, verseDay:undefined, verseAt:0, join:null, archOpen:false, up:0};
+const UI = {reorder:'', form:null, hops:0, verseDay:undefined, verseAt:0, join:null, archOpen:false, up:0, openUser:'', usersOpen:false, invOpen:false};
 const pb = new PocketBase(location.origin);
 pb.autoCancellation(false);
 const me = () => pb.authStore.record || {};
 const isAdmin = () => me().role === 'admin';
+// Доступ на срок (правки 2.5): без доступа можно смотреть, а добавлять и менять нельзя
+const readOnly = () => !!(S.access && !S.access.active);
 
 /* ---------- Тема оформления: auto (как в системе), light, dark ---------- */
 const darkMQ = window.matchMedia('(prefers-color-scheme: dark)');
@@ -176,7 +178,7 @@ function refreshGroups(){ clearTimeout(gTimer); gTimer = setTimeout(() => loadAl
 let subscribed = false;
 async function subscribeAll(){
   if(subscribed) return; subscribed = true;
-  await pb.collection('users').subscribe(me().id, e => { if(e.action === 'update'){ pb.authStore.save(pb.authStore.token, e.record); themeFromUser(); schedule(); } });
+  await pb.collection('users').subscribe(me().id, e => { if(e.action === 'update'){ pb.authStore.save(pb.authStore.token, e.record); themeFromUser(); schedule(); loadAccess(); } });
   for(const k of KEYS){
     if(k === 'people' || k === 'shared') continue;
     await pb.collection(PBN[k]).subscribe('*', e => {
@@ -210,7 +212,7 @@ async function startApp(){
   themeFromUser();
   render(true);
   try {
-    await loadAll();
+    await Promise.all([loadAll(), loadAccess()]);
     S.loaded = true; $('#notice').hidden = true; render(true);
     if(route().name === 'profile') loadProfileExtras();
     touchMaterial();
@@ -224,7 +226,7 @@ async function startApp(){
 document.addEventListener('visibilitychange', () => {
   if(document.visibilityState !== 'visible'){ savePos(true); return; } // ушли с экрана: запоминаем место в плеере
   checkUpdate();
-  if(S.loaded && pb.authStore.isValid) loadAll().catch(() => {});
+  if(S.loaded && pb.authStore.isValid){ loadAll().catch(() => {}); loadAccess(); }
 });
 window.addEventListener('pagehide', () => savePos(true));
 
@@ -251,6 +253,40 @@ window.addEventListener('offline', () => { showNotice('Нет подключен
 let raf = 0;
 function schedule(){ if(raf) return; raf = requestAnimationFrame(() => { raf = 0; render(); }); }
 function showNotice(text){ $('#notice-text').textContent = text; $('#notice').hidden = false; }
+
+/* ---------- Срок доступа (правки 2.5) ---------- */
+// Состояние приходит с сервера: «сегодня» он считает по времени Хабаровска.
+// Полоску вверху можно закрыть до следующего входа (mol_accHide сбрасывается при входе и выходе).
+const contactHTML = c => /^[^\s@]+@[^\s@]+$/.test(c || '') ? `<a href="mailto:${esc(c)}">${esc(c)}</a>` : esc(c || 'администратору');
+const daysLeft = a => Math.round(dnum(a.until) - dnum(a.today));
+const leftText = k => k <= 0 ? 'сегодня последний день' : `осталось ${k} ${plural(k, DAYS)}`;
+async function loadAccess(){
+  if(!pb.authStore.isValid) return;
+  try { S.access = await pb.send('/api/molitva/access', {}); } catch(e){ return; }
+  renderAccessBar();
+  schedule();
+}
+const accKey = a => [me().id, a.reason, a.until].join('|');
+function renderAccessBar(){
+  const a = S.access, bar = $('#access-bar');
+  let html = '';
+  if(a && !a.active){
+    html = `<b>Доступ приостановлен${a.reason === 'expired' ? ` (срок закончился ${fmtDay(a.until)})` : ''}.</b> Можно смотреть записи, а добавлять и менять нельзя. Чтобы продлить, напишите: ${contactHTML(a.contact)}`;
+  } else if(a && a.until && !a.admin && daysLeft(a) <= 7){
+    html = `Доступ действует до ${fmtDay(a.until)} (${leftText(daysLeft(a))}). Чтобы продлить, напишите: ${contactHTML(a.contact)}`;
+  }
+  bar.classList.toggle('off', !!(a && !a.active));
+  $('#access-text').innerHTML = html;
+  bar.hidden = !html || loadLS('accHide', '') === accKey(a);
+}
+$('#access-close').addEventListener('click', () => { if(S.access) saveLS('accHide', accKey(S.access)); $('#access-bar').hidden = true; });
+function accessLine(){
+  const a = S.access;
+  if(!a) return '';
+  if(a.admin) return 'Вы администратор, доступ бессрочный.';
+  if(!a.active) return `Доступ приостановлен${a.reason === 'expired' ? ` (срок закончился ${fmtDay(a.until)})` : ''}: можно смотреть записи, а добавлять и менять нельзя. Чтобы продлить, напишите: ${contactHTML(a.contact)}`;
+  return a.until ? `Доступ действует до ${fmtDay(a.until)} включительно.` : 'Доступ бессрочный.';
+}
 
 /* ---------- Адреса экранов: #/, #/s/ID, #/n/ID, #/new, #/edit/ID, #/verses, #/answers, #/profile,
    группы: #/groups, #/g/ID, #/gn/ID (общая нужда, ID записи group_needs), #/join/КОД,
@@ -312,18 +348,18 @@ function subHTML(s){
   const n = needsIn(s.id).length, label = `${esc(s.name)}, ${n} ${plural(n, NEEDS)}`;
   if(s.photo) return `<div class="sub-cell"><a class="sub-tile has-photo" href="#/s/${esc(s.id)}" aria-label="${label}">${WATER}<span class="sub-ph" aria-hidden="true">${imgTag(roundSrc(s))}</span><span class="sub-name">${esc(s.name)}</span></a></div>`;
   return `<div class="sub-cell"><a class="sub-tile" href="#/s/${esc(s.id)}" aria-label="${label}">${WATER}<span class="sub-name">${esc(s.name)}</span></a>
-    <button type="button" class="sub-add" data-act="sub-photo" data-id="${esc(s.id)}" aria-label="Добавить фото для подраздела ${esc(s.name)}"><span>${ICON.plus}</span></button></div>`;
+    ${readOnly() ? '' : `<button type="button" class="sub-add" data-act="sub-photo" data-id="${esc(s.id)}" aria-label="Добавить фото для подраздела ${esc(s.name)}"><span>${ICON.plus}</span></button>`}</div>`;
 }
 const addSub = (href, label) => `<div class="sub-cell"><a class="sub-tile add" href="${href}" aria-label="${label}"><span class="water" aria-hidden="true"></span>${ICON.plus}</a></div>`;
 // Сетка камней или воды; в режиме «Переставить» под каждым стрелки влево и вправо
 function stonesGrid(list, scope, addHref, addLabel, water){
-  const mode = UI.reorder === scope;
+  const ro = readOnly(), mode = !ro && UI.reorder === scope;
   const cell = water ? subHTML : stoneHTML;
   const cells = list.map((s, i) => mode
     ? `<div class="stone-cell">${cell(s)}<div class="move"><button class="icon-btn" data-act="move" data-key="sections" data-scope="${scope}" data-id="${esc(s.id)}" data-dir="-1" aria-label="Переставить левее"${i ? '' : ' disabled'}>${ICON.left}</button><button class="icon-btn" data-act="move" data-key="sections" data-scope="${scope}" data-id="${esc(s.id)}" data-dir="1" aria-label="Переставить правее"${i < list.length - 1 ? '' : ' disabled'}>${ICON.right}</button></div></div>`
     : cell(s)).join('');
-  const add = addHref && !mode ? (water ? addSub : addStone)(addHref, addLabel) : '';
-  const toggle = list.length > 1 ? `<div class="row-actions"><button class="btn ghost sm" data-act="reorder" data-scope="${scope}">${mode ? 'Готово' : water ? 'Переставить' : 'Переставить камни'}</button></div>` : '';
+  const add = addHref && !mode && !ro ? (water ? addSub : addStone)(addHref, addLabel) : '';
+  const toggle = list.length > 1 && !ro ? `<div class="row-actions"><button class="btn ghost sm" data-act="reorder" data-scope="${scope}">${mode ? 'Готово' : water ? 'Переставить' : 'Переставить камни'}</button></div>` : '';
   return `<div class="${water ? 'subs' : 'stones'}">${cells}${add}</div>${toggle}`;
 }
 
@@ -357,6 +393,7 @@ function vHome(){
   const cv = currentVerse();
   const verse = cv
     ? `<a class="verse" href="#/verses"><span class="top"><span>Мой стих</span>${cv.n > 1 ? `<span>${cv.i + 1} из ${cv.n}</span>` : ''}</span><span class="text">${esc(cv.v.text)}</span>${cv.v.ref ? `<span class="ref">${esc(cv.v.ref)}</span>` : ''}</a>`
+    : readOnly() ? ''
     : `<button type="button" class="verse empty-verse" data-act="new-verse"><span class="top"><span>Мой стих</span></span><span class="text">Нажмите, чтобы вписать стих, который хотите держать перед глазами</span></button>`;
   // неделя с понедельника по воскресенье; будущие дни бледные
   const t = todayISO(), now = new Date(), wi = monIndex(now), mon = addDays(t, -wi);
@@ -368,7 +405,7 @@ function vHome(){
   }).join('');
   const marked = !!dayRec(t);
   const week = `<section class="card week-card"><div class="week-top"><div class="wt"><b>${WDF[now.getDay()]}, ${now.getDate()} ${MONF[now.getMonth()]}</b><span>на этой неделе ${done} из 7 дней</span></div>
-      <button type="button" class="pray-btn${marked ? ' on' : ''}" data-act="today" aria-pressed="${marked}">${marked ? ICON.check : ''}<span>Помолился</span></button></div>
+      <button type="button" class="pray-btn${marked ? ' on' : ''}" data-act="today" aria-pressed="${marked}"${readOnly() ? ' disabled' : ''}>${marked ? ICON.check : ''}<span>Помолился</span></button></div>
     <button type="button" class="week" data-act="calendar" aria-label="На этой неделе молился ${done} из 7 дней. Открыть календарь молитв">${days}</button>
     ${dayVerseHTML(marked, t)}</section>`;
   const tops = topSections();
@@ -376,7 +413,7 @@ function vHome(){
     ${verse}${week}
     <h2 class="label">Мои разделы</h2>
     ${stonesGrid(tops, 'home', '#/new', 'Создать раздел')}
-    ${tops.length ? '' : '<p class="hint">Нажмите на камень, чтобы создать первый раздел: назовите его и выберите цвет.</p>'}`;
+    ${tops.length || readOnly() ? '' : '<p class="hint">Нажмите на камень, чтобы создать первый раздел: назовите его и выберите цвет.</p>'}`;
 }
 
 /* ---------- Раздел ---------- */
@@ -402,12 +439,12 @@ function vSection(r){
   const needs = needsIn(s.id).sort(needSort);
   const counter = [subs.length ? `${subs.length} ${plural(subs.length, SUBS)}` : '', `${needs.length} ${plural(needs.length, NEEDS)}`].filter(Boolean).join(' · ');
   return `<div class="nav-head">${parent ? backLink('#/s/' + esc(parent.id), parent.name) : backLink('#/', 'Главная')}
-      <button type="button" class="icon-btn" data-act="sec-menu" data-id="${esc(s.id)}" aria-label="Действия с разделом: изменить, удалить" aria-haspopup="menu">${ICON.more}</button></div>
+      ${readOnly() ? '' : `<button type="button" class="icon-btn" data-act="sec-menu" data-id="${esc(s.id)}" aria-label="Действия с разделом: изменить, удалить" aria-haspopup="menu">${ICON.more}</button>`}</div>
     <div class="sec-title">${secMini(s)}<div><h1>${esc(s.name)}</h1><span>${counter}</span></div></div>
     ${parent ? '' : `<h2 class="label">Подразделы</h2>${stonesGrid(subs, 's:' + s.id, '#/new?in=' + esc(s.id), 'Создать подраздел', true)}`}
     <h2 class="label">Нужды</h2>
     ${needs.length ? `<div class="needs">${needs.map(needRow).join('')}</div>` : '<p class="hint">Здесь будут нужды этого раздела: люди, просьбы, события.</p>'}
-    <button type="button" class="dashed" data-act="new-need" data-id="${esc(s.id)}">+ Добавить нужду</button>`;
+    ${readOnly() ? '' : `<button type="button" class="dashed" data-act="new-need" data-id="${esc(s.id)}">+ Добавить нужду</button>`}`;
 }
 
 /* ---------- Нужда ---------- */
@@ -425,20 +462,23 @@ function vNeed(r){
   const meta = ['С ' + fmtDay(createdISO(n)), n.answered_at ? '' : prayedText(n.last_prayed_at).toLowerCase()].filter(Boolean).join(' · ');
   // открыли из группы: «Назад» ведёт в группу
   const fromG = r.q.get('g') ? byId('groups', r.q.get('g')) : null;
+  const ro = readOnly(), off = ro ? ' disabled' : '';
   return `<div class="nav-head">${fromG ? backLink('#/g/' + esc(fromG.id), fromG.name) : backLink('#/s/' + esc(n.section), pathOf(sec).join(' › ') || 'Раздел')}
-      <button type="button" class="icon-btn" data-act="need-menu" data-id="${esc(n.id)}" aria-label="Действия с нуждой: изменить, перенести, удалить" aria-haspopup="menu">${ICON.more}</button></div>
+      ${ro ? '' : `<button type="button" class="icon-btn" data-act="need-menu" data-id="${esc(n.id)}" aria-label="Действия с нуждой: изменить, перенести, удалить" aria-haspopup="menu">${ICON.more}</button>`}</div>
     ${photo}
     <div class="need-head${n.photo ? ' center' : ''}"><h1>${esc(n.title)}</h1><span>${esc(meta)}</span></div>
     ${n.description ? `<p class="prose">${esc(n.description)}</p>` : ''}
     <div class="btn-row">
-      <button type="button" class="btn ${prayedToday ? 'soft' : 'primary'}" data-act="prayed" data-id="${esc(n.id)}">${prayedToday ? 'Молился сегодня' : 'Помолился'}</button>
-      <button type="button" class="btn ${n.answered_at ? 'soft' : 'outline'}" data-act="answered" data-id="${esc(n.id)}">${n.answered_at ? ICON.check : ''}Отвечено</button>
+      <button type="button" class="btn ${prayedToday ? 'soft' : 'primary'}" data-act="prayed" data-id="${esc(n.id)}"${off}>${prayedToday ? 'Молился сегодня' : 'Помолился'}</button>
+      <button type="button" class="btn ${n.answered_at ? 'soft' : 'outline'}" data-act="answered" data-id="${esc(n.id)}"${off}>${n.answered_at ? ICON.check : ''}Отвечено</button>
     </div>
     ${n.answered_at ? `<div class="answer"><b>Отвечено ${fmtDay(n.answered_at)}</b>${n.answer_note ? `<p>${esc(n.answer_note)}</p>` : ''}</div>` : ''}
     ${needShareHTML(n)}
     <h2 class="label">Мои молитвы <span class="side">${ICON.lock}видно только вам</span></h2>
-    ${prayers.length ? `<div class="entries">${prayers.map(p => `<button type="button" class="entry" data-act="edit-prayer" data-id="${esc(p.id)}"><small>${fmtDay(p.date)}</small><span>${esc(p.text)}</span></button>`).join('')}</div>` : ''}
-    <button type="button" class="dashed" data-act="new-prayer" data-id="${esc(n.id)}">+ Записать молитву</button>`;
+    ${prayers.length ? `<div class="entries">${prayers.map(p => ro
+      ? `<div class="entry"><small>${fmtDay(p.date)}</small><span>${esc(p.text)}</span></div>`
+      : `<button type="button" class="entry" data-act="edit-prayer" data-id="${esc(p.id)}"><small>${fmtDay(p.date)}</small><span>${esc(p.text)}</span></button>`).join('')}</div>` : ro ? '<p class="hint">Записей молитв нет.</p>' : ''}
+    ${ro ? '' : `<button type="button" class="dashed" data-act="new-prayer" data-id="${esc(n.id)}">+ Записать молитву</button>`}`;
 }
 
 /* ---------- Новый раздел и изменение раздела ---------- */
@@ -455,6 +495,7 @@ function formInit(r){
 }
 function vSectionForm(r){
   if(r.name === 'edit' && !byId('sections', r.id)) return notFound();
+  if(readOnly()) return `<div class="nav-head">${backLink('#/', 'Главная')}</div><div class="card"><p>${accessLine()}</p></div>`;
   const f = formInit(r);
   const c = COLORS[f.color] || COLORS.granite;
   const hasSubs = f.id && childrenOf(f.id).length > 0;
@@ -521,18 +562,18 @@ const nextSort = list => list.reduce((m, x) => Math.max(m, x.sort ?? 0), -1) + 1
 /* ---------- Мои стихи ---------- */
 function vVerses(){
   const list = sortedVerses(), cv = currentVerse(), per = me().verse_period || 'daily';
-  const mode = UI.reorder === 'verses';
+  const ro = readOnly(), mode = !ro && UI.reorder === 'verses';
   const items = list.map((v, i) => `<div class="verse-item${cv && cv.v.id === v.id ? ' current' : ''}"><div class="vi">
       ${cv && cv.v.id === v.id ? '<span class="pill">Сейчас на главной</span>' : ''}<span class="vt">${esc(v.text)}</span>${v.ref ? `<span class="vr">${esc(v.ref)}</span>` : ''}</div>
       ${mode ? `<div class="vbtns"><button class="icon-btn" data-act="move" data-key="verses" data-scope="verses" data-id="${esc(v.id)}" data-dir="-1" aria-label="Выше"${i ? '' : ' disabled'}>${ICON.up}</button><button class="icon-btn" data-act="move" data-key="verses" data-scope="verses" data-id="${esc(v.id)}" data-dir="1" aria-label="Ниже"${i < list.length - 1 ? '' : ' disabled'}>${ICON.down}</button></div>`
-        : `<button type="button" class="icon-btn" data-act="edit-verse" data-id="${esc(v.id)}" aria-label="Изменить стих${v.ref ? ': ' + esc(v.ref) : ''}">${ICON.pen}</button>`}</div>`).join('');
+        : ro ? '' : `<button type="button" class="icon-btn" data-act="edit-verse" data-id="${esc(v.id)}" aria-label="Изменить стих${v.ref ? ': ' + esc(v.ref) : ''}">${ICON.pen}</button>`}</div>`).join('');
   return `<div class="nav-head">${backLink('#/profile', 'Профиль')}</div>
     <div><h1 class="title">Мои стихи</h1><p class="lead">Стих на главной меняется по кругу. Можно вписать до ${MAX_VERSES} стихов.</p></div>
-    <section class="card"><h2>Менять стих</h2><div class="choice four">${Object.entries(PERIODS).map(([k, p]) => `<button type="button" data-act="period" data-period="${k}" aria-pressed="${k === per}">${p[0]}</button>`).join('')}</div></section>
+    <section class="card"><h2>Менять стих</h2><div class="choice four">${Object.entries(PERIODS).map(([k, p]) => `<button type="button" data-act="period" data-period="${k}" aria-pressed="${k === per}"${ro ? ' disabled' : ''}>${p[0]}</button>`).join('')}</div></section>
     <h2 class="label">Стихи <span class="side">${list.length} из ${MAX_VERSES}</span></h2>
-    ${list.length ? `<div class="entries">${items}</div>` : '<p class="hint">Стихов пока нет. Впишите стих, который хотите держать перед глазами.</p>'}
-    ${list.length > 1 ? `<div class="row-actions"><button class="btn ghost sm" data-act="reorder" data-scope="verses">${mode ? 'Готово' : 'Переставить'}</button></div>` : ''}
-    <button type="button" class="dashed" data-act="new-verse"${list.length >= MAX_VERSES ? ' disabled' : ''}>${list.length >= MAX_VERSES ? `Вписано ${MAX_VERSES} из ${MAX_VERSES} стихов` : `+ Добавить стих (${list.length} из ${MAX_VERSES})`}</button>`;
+    ${list.length ? `<div class="entries">${items}</div>` : ro ? '<p class="hint">Стихов пока нет.</p>' : '<p class="hint">Стихов пока нет. Впишите стих, который хотите держать перед глазами.</p>'}
+    ${ro ? '' : list.length > 1 ? `<div class="row-actions"><button class="btn ghost sm" data-act="reorder" data-scope="verses">${mode ? 'Готово' : 'Переставить'}</button></div>` : ''}
+    ${ro ? '' : `<button type="button" class="dashed" data-act="new-verse"${list.length >= MAX_VERSES ? ' disabled' : ''}>${list.length >= MAX_VERSES ? `Вписано ${MAX_VERSES} из ${MAX_VERSES} стихов` : `+ Добавить стих (${list.length} из ${MAX_VERSES})`}</button>`}`;
 }
 
 /* ---------- Ответы на молитвы ---------- */
@@ -575,16 +616,17 @@ function vGroups(){
       <span class="faces">${faces}</span>
       <span class="gc-meta">Сегодня молились ${prayedToday(g.id)} из ${ms.length} · ${k} ${plural(k, NEEDS)}</span></a>`;
   }).join('');
-  const full = list.length >= MAX_GROUPS;
+  const full = list.length >= MAX_GROUPS, ro = readOnly();
   return `<header class="head"><h1>Группы</h1></header>
     ${list.length ? `<div class="groups">${cards}</div>`
+      : ro ? '<section class="card"><p class="empty">Вы пока не состоите ни в одной группе.</p></section>'
       : '<section class="card"><p class="empty">Группа нужна, чтобы молиться вместе: делиться нуждами и видеть, кто сегодня молился. Чтобы молиться вдвоём, создайте группу и отправьте ссылку близкому человеку.</p></section>'}
-    <button type="button" class="${list.length ? 'dashed' : 'btn primary big wide'}" data-act="new-group"${full ? ' disabled' : ''}>${full ? `Вы уже в ${MAX_GROUPS} группах` : list.length ? '+ Создать группу' : 'Создать группу'}</button>`;
+    ${ro ? '' : `<button type="button" class="${list.length ? 'dashed' : 'btn primary big wide'}" data-act="new-group"${full ? ' disabled' : ''}>${full ? `Вы уже в ${MAX_GROUPS} группах` : list.length ? '+ Создать группу' : 'Создать группу'}</button>`}`;
 }
 
 // Кнопка «Помолился» у общей нужды (как на главной) и счётчик «Сегодня молились»
 function gPrayBtn(l){ const on = prayingOf(l.id).some(p => p.user === me().id);
-  return `<button type="button" class="pray-btn${on ? ' on' : ''}" data-act="g-pray" data-id="${esc(l.id)}" aria-pressed="${on}">${on ? ICON.check : ''}<span>Помолился</span></button>`; }
+  return `<button type="button" class="pray-btn${on ? ' on' : ''}" data-act="g-pray" data-id="${esc(l.id)}" aria-pressed="${on}"${readOnly() ? ' disabled' : ''}>${on ? ICON.check : ''}<span>Помолился</span></button>`; }
 function gCount(l){ const k = prayingOf(l.id).length;
   return k ? `<button type="button" class="gn-count" data-act="g-who" data-id="${esc(l.id)}">${prayCount(k)}</button>` : `<span class="gn-count none">${prayCount(0)}</span>`; }
 // заметку об ответе сервер присылает участникам, только если владелец ею поделился
@@ -607,7 +649,7 @@ function gneedRow(l, n){
 function vGroup(r){
   const g = byId('groups', r.id);
   if(!g) return groupGone();
-  const ms = membersOf(g.id), own = isOwner(g);
+  const ms = membersOf(g.id), ro = readOnly(), own = isOwner(g) && !ro;
   // неделя группы: строка на участника, семь кружков с понедельника, сегодняшний столбец выделен
   const wi = monIndex(new Date()), dates = WDM.map((_, k) => addDays(weekStart(), k));
   const head = `<span></span>${WDM.map((l, k) => `<span class="gw-l${k === wi ? ' today' : ''}" aria-hidden="true">${l}</span>`).join('')}`;
@@ -627,14 +669,14 @@ function vGroup(r){
   return `<div class="nav-head">${backLink('#/groups', 'Группы')}<div class="nav-acts">
       ${own ? `<button type="button" class="pill-btn" data-act="g-invite" data-id="${esc(g.id)}">Пригласить</button>` : ''}
       <button type="button" class="icon-btn" data-act="g-menu" data-id="${esc(g.id)}" aria-label="Действия с группой" aria-haspopup="menu">${ICON.more}</button></div></div>
-    <div class="g-title"><h1 class="title">${esc(g.name)}</h1><span>${ms.length} ${plural(ms.length, MEMBERS)} · ${own ? 'вы создатель' : 'создатель ' + esc(nameOf(person(g.owner)))}</span></div>
+    <div class="g-title"><h1 class="title">${esc(g.name)}</h1><span>${ms.length} ${plural(ms.length, MEMBERS)} · ${isOwner(g) ? 'вы создатель' : 'создатель ' + esc(nameOf(person(g.owner)))}</span></div>
     ${alone}
     <section class="card gweek"><div class="gw-top"><b>Неделя группы</b><span>Сегодня молились ${prayedToday(g.id)} из ${ms.length}</span></div>
       <div class="gw-grid">${head}${rows}</div></section>
     <h2 class="label">Общие нужды${links.length ? `<span class="side">${links.length}</span>` : ''}</h2>
     ${links.length ? `<div class="needs">${links.map(x => gneedRow(x.l, x.n)).join('')}</div>`
       : '<p class="hint">Здесь будут нужды, которыми участники поделились с группой. Записи молитв при этом видит только владелец нужды.</p>'}
-    <button type="button" class="dashed" data-act="g-add-need" data-id="${esc(g.id)}">+ Нужда в группу</button>`;
+    ${ro ? '' : `<button type="button" class="dashed" data-act="g-add-need" data-id="${esc(g.id)}">+ Нужда в группу</button>`}`;
 }
 
 // Чужая общая нужда: только чтение. Свою нужду владелец видит как обычно, со всеми кнопками.
@@ -672,7 +714,7 @@ function vJoin(r){
   if(d.full) return head + `<section class="card join-card">${top}<p>В группе уже ${MAX_MEMBERS} участников, больше вступить нельзя.</p><a class="btn wide" href="#/groups">К группам</a></section>`;
   return head + `<section class="card join-card">${top}
     <p class="hint">Участники увидят ваше имя, фото профиля, в какие дни вы молились в группе, за какие общие нужды молились сегодня, и нужды, которыми вы сами поделитесь. Записи молитв останутся видны только вам.</p>
-    <button type="button" class="btn primary big wide" data-act="join" data-code="${esc(code)}">Вступить</button>
+    ${readOnly() ? `<p class="form-err">Вступить в группу сейчас нельзя. ${accessLine()}</p>` : `<button type="button" class="btn primary big wide" data-act="join" data-code="${esc(code)}">Вступить</button>`}
     <a class="btn ghost wide" href="#/groups">Не сейчас</a></section>`;
 }
 async function loadJoin(code){
@@ -684,12 +726,13 @@ async function loadJoin(code){
 // Блок в своей нужде: в каких группах, кто молится, виден ли ответ группе
 function needShareHTML(n){
   const ls = linksOfNeed(n.id).map(l => ({l, g: byId('groups', l.group)})).filter(x => x.g);
-  if(!ls.length) return `<button type="button" class="btn outline share-btn" data-act="share-need" data-id="${esc(n.id)}">${ICON.group}Поделиться с группой</button>`;
+  const ro = readOnly();
+  if(!ls.length) return ro ? '' : `<button type="button" class="btn outline share-btn" data-act="share-need" data-id="${esc(n.id)}">${ICON.group}Поделиться с группой</button>`;
   const names = ls.map(x => `<a href="#/g/${esc(x.g.id)}">${esc(x.g.name)}</a>`).join(', ');
   const counts = n.answered_at ? '' : ls.map(x => { const k = prayingOf(x.l.id).length; return k ? `<button type="button" class="gn-count" data-act="g-who" data-id="${esc(x.l.id)}">${ls.length > 1 ? esc(x.g.name) + ': ' : ''}${prayCount(k)}</button>` : ''; }).join('');
   const ans = n.answered_at
-    ? `<div class="share-ans"><span>${n.answer_shared ? 'Ответ виден группе' : 'Ответ видите только вы'}</span><button type="button" class="btn sm" data-act="answer-share" data-id="${esc(n.id)}">${n.answer_shared ? 'Скрыть от группы' : 'Показать группе'}</button></div>` : '';
-  return `<section class="share"><div class="share-top">${ICON.group}<p>В группах: ${names}</p><button type="button" class="btn sm ghost" data-act="share-need" data-id="${esc(n.id)}">Изменить</button></div>
+    ? `<div class="share-ans"><span>${n.answer_shared ? 'Ответ виден группе' : 'Ответ видите только вы'}</span>${ro ? '' : `<button type="button" class="btn sm" data-act="answer-share" data-id="${esc(n.id)}">${n.answer_shared ? 'Скрыть от группы' : 'Показать группе'}</button>`}</div>` : '';
+  return `<section class="share"><div class="share-top">${ICON.group}<p>В группах: ${names}</p>${ro ? '' : `<button type="button" class="btn sm ghost" data-act="share-need" data-id="${esc(n.id)}">Изменить</button>`}</div>
     ${counts ? `<div class="share-counts">${counts}</div>` : ''}${ans}</section>`;
 }
 
@@ -777,7 +820,7 @@ function openInvite(g){
     }});
 }
 function openMembers(g){
-  const own = isOwner(g);
+  const own = isOwner(g) && !readOnly();
   const rows = membersOf(g.id).map(m => {
     const acts = own && m.user !== me().id ? `<div class="mb-acts"><button type="button" class="btn sm" data-dlg="owner" data-id="${esc(m.user)}">Сделать создателем</button><button type="button" class="btn sm ghost danger" data-dlg="kick" data-id="${esc(m.user)}">Исключить</button></div>` : '';
     return personRow(m.user, (m.user === g.owner ? '<span class="pill">создатель</span>' : '') + acts);
@@ -812,7 +855,9 @@ function openNewLink(g){
 function leaveGroup(g){
   const own = isOwner(g);
   if(own && membersOf(g.id).length > 1){
-    info('Сначала передайте роль создателя', 'Создатель не может просто выйти из группы. Откройте «Участники» и нажмите «Сделать создателем» рядом с тем, кто будет вести группу. После этого можно выйти.');
+    info('Сначала передайте роль создателя', readOnly()
+      ? 'Создатель не может выйти, пока в группе есть другие участники, а передать роль создателя без доступа нельзя. ' + accessLine().replace(/<[^>]+>/g, '')
+      : 'Создатель не может просто выйти из группы. Откройте «Участники» и нажмите «Сделать создателем» рядом с тем, кто будет вести группу. После этого можно выйти.');
     return;
   }
   openForm({title: 'Выйти из группы?', submit: 'Выйти', danger: true,
@@ -829,12 +874,12 @@ function deleteGroup(g){
     async onSave(){ await pb.collection('groups').delete(g.id); await loadAll(GKEYS); toast('Группа удалена'); go('#/groups', true); }});
 }
 function groupMenu(btn, g){
-  const own = isOwner(g);
+  const own = isOwner(g) && !readOnly();
   openMenu(btn, [
     ...(own ? [{label: 'Пригласить', run: () => openInvite(g)}] : []),
     {label: 'Участники', run: () => openMembers(g)},
     ...(own ? [{label: 'Переименовать', run: () => openRenameGroup(g)}, {label: 'Новая ссылка', run: () => openNewLink(g)}] : []),
-    {label: 'Выйти из группы', danger: !own, run: () => leaveGroup(g)},
+    {label: 'Выйти из группы', danger: !isOwner(g), run: () => leaveGroup(g)},
     ...(own ? [{label: 'Удалить группу', danger: true, run: () => deleteGroup(g)}] : [])
   ]);
 }
@@ -916,7 +961,7 @@ function matCard(m){
         ${m.summary ? `<span class="desc">${esc(m.summary)}</span>` : ''}
         <span class="when"><span>${esc(matMeta(m))}</span>${pills}</span></span>
     </a>
-    <button type="button" class="icon-btn" data-act="mat-menu" data-id="${esc(m.id)}" aria-label="Действия с материалом «${esc(m.title)}»" aria-haspopup="menu">${ICON.more}</button>
+    ${readOnly() ? '' : `<button type="button" class="icon-btn" data-act="mat-menu" data-id="${esc(m.id)}" aria-label="Действия с материалом «${esc(m.title)}»" aria-haspopup="menu">${ICON.more}</button>`}
     ${pr ? `<span class="mat-bar" aria-hidden="true"><i style="width:${Math.round(pr * 100)}%"></i></span>` : ''}</div>`;
 }
 
@@ -953,7 +998,7 @@ function vMaterial(r){
     : '<p class="hint">Адрес ещё не вписан.</p>';
   else body = matMediaHTML(m);
   return `<div class="nav-head">${backLink('#/materials', 'Материалы')}
-      <button type="button" class="icon-btn" data-act="mat-menu" data-id="${esc(m.id)}" aria-label="Действия с материалом" aria-haspopup="menu">${ICON.more}</button></div>
+      ${readOnly() ? '' : `<button type="button" class="icon-btn" data-act="mat-menu" data-id="${esc(m.id)}" aria-label="Действия с материалом" aria-haspopup="menu">${ICON.more}</button>`}</div>
     ${cover}
     <div class="mat-head"><h1 class="title">${esc(m.title)}</h1><span>${esc(matMeta(m))}${m.published ? '' : ' · черновик'}</span></div>
     ${m.summary ? `<p class="lead">${esc(m.summary)}</p>` : ''}
@@ -1077,6 +1122,7 @@ function savePos(force){
   const t = Math.floor(el.currentTime || 0);
   if(!force && Math.abs(t - PL.last) < 15) return;
   PL.last = t;
+  if(readOnly()) return; // без доступа отметки материалов не меняются
   setMark(id, {position: el.duration - t < 15 ? 0 : t}).catch(() => {});
 }
 // Название и кнопки на экране блокировки телефона, если браузер это умеет
@@ -1185,7 +1231,7 @@ async function matMark(m, patch){
 let openedMat = '';
 function touchMaterial(){
   const r = route();
-  if(r.name !== 'm' || !S.loaded || openedMat === r.id) return;
+  if(r.name !== 'm' || !S.loaded || openedMat === r.id || readOnly()) return;
   const m = byId('materials', r.id);
   if(!m || !isNewMat(m)) return;
   openedMat = r.id;
@@ -1201,10 +1247,12 @@ function vProfile(){
   const answered = S.needs.filter(n => n.answered_at).length;
   const inv = S.invites.slice().sort((a, b) => String(b.created).localeCompare(String(a.created)));
   const usage = S.usage ? `<p class="hint">Фото занимают ${fsize(S.usage.used || 1)} из ${Math.round(S.usage.quota / MB)} МБ.</p>` : '';
+  const ro = readOnly();
   return `<header class="head"><h1>Профиль</h1></header>
     <section class="card me-card"><span class="me" aria-hidden="true">${avatarInner(u)}</span><div class="who"><b>${esc(u.name || 'Без имени')}</b><span>${esc(u.email || '')}</span>
-        <button type="button" class="btn sm" data-act="avatar">${u.avatar ? 'Изменить фото' : 'Поставить фото'}</button></div>
-      <button type="button" class="icon-btn" data-act="edit-name" aria-label="Изменить имя">${ICON.pen}</button></section>
+        ${ro ? '' : `<button type="button" class="btn sm" data-act="avatar">${u.avatar ? 'Изменить фото' : 'Поставить фото'}</button>`}</div>
+      ${ro ? '' : `<button type="button" class="icon-btn" data-act="edit-name" aria-label="Изменить имя">${ICON.pen}</button>`}</section>
+    ${S.access ? `<p class="acc-line${S.access.active ? '' : ' off'}">${accessLine()}</p>` : ''}
     <nav class="links" aria-label="Мои записи">
       <a href="#/verses">${ICON.book}Мои стихи<span class="n">${S.verses.length} из ${MAX_VERSES}</span>${ICON.chev}</a>
       <a href="#/answers">${ICON.check}Ответы на молитвы<span class="n">${answered}</span>${ICON.chev}</a>
@@ -1212,15 +1260,17 @@ function vProfile(){
     <section class="card"><h2>Оформление</h2>
       <div class="seg3" role="radiogroup" aria-label="Тема">${[['light','Светлая'],['dark','Тёмная'],['auto','Как в системе']].map(([k, l]) =>
         `<input type="radio" name="p-theme" id="p-theme-${k}" value="${k}"${themePref() === k ? ' checked' : ''}><label for="p-theme-${k}">${l}</label>`).join('')}</div></section>
-    ${isAdmin() ? `<details class="fold"><summary><span>Приглашения</span>${ICON.chev}</summary><div class="fold-body">
+    ${isAdmin() ? `<details class="fold" id="inv-fold"${UI.invOpen ? ' open' : ''}><summary><span>Приглашения</span>${ICON.chev}</summary><div class="fold-body">
       <p class="hint">Новый человек может зарегистрироваться только по приглашению. Создайте его и отправьте ссылку.</p>
       <div class="field"><label for="i-note">Для кого (заметка)</label><input type="text" id="i-note" placeholder="Например: мама"></div>
       <div class="field"><label for="i-max">Сколько регистраций</label><select id="i-max"><option value="1">1 человек</option><option value="5">до 5 человек</option><option value="20">до 20 человек</option><option value="0">без ограничения</option></select></div>
       <div class="field"><label for="i-exp">Действует до (необязательно)</label><input type="date" id="i-exp"></div>
+      <div class="field"><label for="i-period">Срок доступа для новых пользователей</label><select id="i-period">${Object.entries(ACC_PERIODS).map(([k, l]) => `<option value="${k}">${l}</option>`).join('')}</select></div>
       <button type="button" class="btn primary" data-act="new-invite">Создать и скопировать ссылку</button>
-      <div>${inv.length ? inv.map(i => `<div class="inv"><code>${esc(i.code)}</code><span class="muted">${i.note ? esc(i.note) + ' · ' : ''}использовано ${i.uses || 0}${i.max_uses > 0 ? ' из ' + i.max_uses : ', без ограничения'}${i.expires ? ' · до ' + fmtDay(i.expires) : ''}</span>
+      <div>${inv.length ? inv.map(i => `<div class="inv"><code>${esc(i.code)}</code><span class="muted">${i.note ? esc(i.note) + ' · ' : ''}использовано ${i.uses || 0}${i.max_uses > 0 ? ' из ' + i.max_uses : ', без ограничения'}${i.expires ? ' · до ' + fmtDay(i.expires) : ''}${i.access_period ? ' · доступ ' + esc(ACC_PERIODS[i.access_period] || i.access_period) : ''}</span>
         <div class="acts"><button type="button" class="btn sm" data-act="copy-invite" data-code="${esc(i.code)}">Скопировать ссылку</button><button type="button" class="btn sm ghost danger" data-act="del-invite" data-id="${esc(i.id)}">Удалить</button></div></div>`).join('') : '<p class="hint">Приглашений пока нет.</p>'}</div>
-    </div></details>` : ''}
+    </div></details>
+    ${usersSection()}` : ''}
     <details class="fold"><summary><span>Сменить пароль</span>${ICON.chev}</summary><div class="fold-body">
       <div class="field"><label for="p-old">Текущий пароль</label><input type="password" id="p-old" autocomplete="current-password"></div>
       <div class="field"><label for="p-new">Новый пароль (не короче 8 символов)</label><input type="password" id="p-new" autocomplete="new-password"></div>
@@ -1235,8 +1285,76 @@ function vProfile(){
 }
 async function loadProfileExtras(){
   try { S.usage = await pb.send('/api/molitva/usage', {}); } catch(e){}
-  if(isAdmin()){ try { S.invites = await pb.collection('invites').getFullList(); } catch(e){} }
+  if(isAdmin()){
+    try { S.invites = await pb.collection('invites').getFullList(); } catch(e){}
+    await loadAdminUsers();
+  }
   if(route().name === 'profile') schedule();
+}
+
+/* ---------- Пользователи (только администратор, правки 2.5) ---------- */
+const ACC_PERIODS = {'': 'бессрочно', '7d': '7 дней', '14d': '14 дней', '1m': '1 месяц', '3m': '3 месяца'};
+const ACC_DONE = {extend: 'Доступ продлён', set: 'Дата доступа изменена', unlimited: 'Доступ бессрочный', suspend: 'Доступ приостановлен', resume: 'Доступ возобновлён', note: 'Заметка сохранена'};
+const ACC_LOG = {set: 'дата изменена', unlimited: 'сделан бессрочным', suspend: 'приостановлен', resume: 'возобновлён', note: 'заметка'};
+const MONTHS = ['месяц','месяца','месяцев'];
+function accLogText(a){
+  const m = /^extend:(\d+)$/.exec(a || '');
+  return m ? `продлён на ${m[1]} ${plural(+m[1], MONTHS)}` : ACC_LOG[a] || a;
+}
+async function loadAdminUsers(){
+  if(!isAdmin()) return;
+  try { S.adminUsers = await pb.send('/api/molitva/admin/users', {}); } catch(e){ return; }
+  if(route().name === 'profile') schedule();
+}
+// Фото пользователя: у других людей фото профиля защищено, администратору его отдаёт отдельный маршрут
+function userPhoto(x){
+  if(x.id === me().id) return photoSrc(me(), 'avatar');
+  const k = 'adm/' + x.id + '/' + x.avatar, v = PH.get(k);
+  if(v && v !== 'loading' && v !== 'err') return v;
+  if(!v){
+    PH.set(k, 'loading');
+    fetch('/api/molitva/admin/users/' + encodeURIComponent(x.id) + '/avatar', {headers: {Authorization: pb.authStore.token}})
+      .then(r => { if(!r.ok) throw new Error(); return r.blob(); })
+      .then(b => { PH.set(k, URL.createObjectURL(b)); schedule(); }).catch(() => PH.set(k, 'err'));
+  }
+  return '';
+}
+const userFace = x => `<span class="face" aria-hidden="true">${(x.avatar && imgTag(userPhoto(x))) || esc(initial(x))}</span>`;
+function userState(x, today){
+  if(x.role === 'admin') return '<span class="tag">администратор</span>';
+  if(x.suspended) return '<span class="tag bad">приостановлен</span>';
+  if(x.access_until && x.access_until < today) return `<span class="tag bad">срок закончился ${fmtDay(x.access_until)}</span>`;
+  if(!x.access_until) return '<span class="tag ok">бессрочно</span>';
+  const k = Math.round(dnum(x.access_until) - dnum(today));
+  return `<span class="tag${k <= 7 ? ' warn' : ' ok'}">до ${fmtDay(x.access_until)}${k <= 7 ? ', ' + leftText(k) : ''}</span>`;
+}
+const untilText = d => d ? fmtDay(d) : 'бессрочно';
+function usersSection(){
+  const data = S.adminUsers;
+  const n = data ? data.users.length : 0;
+  const head = `<details class="fold" id="users-fold"${UI.usersOpen ? ' open' : ''}><summary><span>Пользователи${data ? ' · ' + n : ''}</span>${ICON.chev}</summary><div class="fold-body">`;
+  if(!data) return head + '<p class="hint">Загружаю…</p></div></details>';
+  const t = data.today;
+  // сначала без доступа, потом с датой (ближайшие сверху), потом бессрочные, администратор в конце
+  const rank = x => x.role === 'admin' ? 3 : !x.active ? 0 : x.access_until ? 1 : 2;
+  const list = data.users.slice().sort((a, b) => rank(a) - rank(b) || (a.access_until || '').localeCompare(b.access_until || '') || String(a.name || a.email).localeCompare(String(b.name || b.email), 'ru'));
+  return head + `<p class="hint">Когда срок доступа заканчивается или вы ставите паузу, человек может только смотреть свои записи, группы и материалы. Данные сохраняются, после продления всё работает как раньше. Продление считается от даты окончания, если она ещё не прошла, иначе от сегодня.</p>
+    <div class="users">${list.map(x => {
+      const id = esc(x.id), adm = x.role === 'admin';
+      const log = x.log.map(l => `<li><span class="d">${fmtDay(String(l.created).slice(0, 10))}</span> ${esc(accLogText(l.action))}${l.until_before !== l.until_after ? `: ${untilText(l.until_before)} → ${untilText(l.until_after)}` : ''}${l.note ? ` · ${esc(l.note)}` : ''}${l.by ? ` <span class="muted">(${esc(l.by)})</span>` : ''}</li>`).join('');
+      return `<div class="usr">
+        <div class="usr-head">${userFace(x)}
+          <div class="usr-main"><b>${esc(x.name || x.email)}</b><span class="muted">${x.name ? esc(x.email) + ' · ' : ''}с ${fmtDay(String(x.created).slice(0, 10))} · ${x.photos_size ? 'фото ' + fsize(x.photos_size) : 'фото нет'}</span><span>${userState(x, t)}</span></div></div>
+        ${adm ? '' : `<div class="usr-acts"><button type="button" class="btn sm" data-act="acc" data-action="extend" data-months="1" data-id="${id}">+1 месяц</button><button type="button" class="btn sm" data-act="acc" data-action="extend" data-months="3" data-id="${id}">+3 месяца</button>${x.suspended ? `<button type="button" class="btn sm" data-act="acc" data-action="resume" data-id="${id}">Возобновить</button>` : `<button type="button" class="btn sm ghost danger" data-act="acc" data-action="suspend" data-id="${id}">Приостановить</button>`}</div>`}
+        <details class="usr-more"${UI.openUser === x.id ? ' open' : ''} data-user="${id}"><summary>${adm ? 'Заметки' : 'Дата, заметка и история'}</summary>
+          ${adm ? '' : `<div class="usr-row"><div class="field"><label for="ud-${id}">Доступ до</label><input type="date" id="ud-${id}" value="${esc(x.access_until || '')}"></div><div class="usr-btns"><button type="button" class="btn sm" data-act="acc" data-action="set" data-id="${id}">Поставить дату</button><button type="button" class="btn sm ghost" data-act="acc" data-action="unlimited" data-id="${id}">Бессрочно</button></div></div>`}
+          <div class="usr-row"><div class="field"><label for="un-${id}">Заметка (видите только вы; добавится и к продлению)</label><input type="text" id="un-${id}" maxlength="1000" placeholder="Например: оплатил 500 ₽ 1 ноября"></div><div class="usr-btns"><button type="button" class="btn sm ghost" data-act="acc" data-action="note" data-id="${id}">Сохранить заметку</button></div></div>
+          ${log ? `<ul class="usr-log">${log}</ul>` : '<p class="hint">Истории пока нет.</p>'}
+        </details>
+      </div>`;
+    }).join('')}</div>
+    <p class="hint">Удалить пользователя совсем можно в панели администратора: <a href="/_/#/collections" target="_blank" rel="noopener">${esc(location.host)}/_/</a>, коллекция <code>users</code>.</p>
+  </div></details>`;
 }
 window.addEventListener('hashchange', () => { if(route().name === 'profile' && S.loaded) loadProfileExtras(); });
 
@@ -1756,7 +1874,7 @@ function calMonthCells(y, m, mini){
     const iso = `${y}-${pad(m + 1)}-${pad(d)}`, on = !!dayRec(iso);
     const cls = `cd${on ? ' on' : ''}${iso === t ? ' today' : ''}${iso > t ? ' future' : ''}`;
     if(mini) html += `<span class="${cls}"></span>`;
-    else if(canMark(iso)) html += `<button type="button" class="${cls} can" data-cal="toggle" data-date="${iso}" aria-pressed="${on}" aria-label="${d} ${MONF[m]}${on ? ', молился' : ''}. Нажмите, чтобы ${on ? 'снять отметку' : 'отметить'}">${d}</button>`;
+    else if(canMark(iso) && !readOnly()) html += `<button type="button" class="${cls} can" data-cal="toggle" data-date="${iso}" aria-pressed="${on}" aria-label="${d} ${MONF[m]}${on ? ', молился' : ''}. Нажмите, чтобы ${on ? 'снять отметку' : 'отметить'}">${d}</button>`;
     else html += `<span class="${cls}" aria-label="${d} ${MONF[m]}${on ? ', молился' : ''}">${d}</span>`;
   }
   return html;
@@ -1783,7 +1901,7 @@ function renderCal(sel){
       <div class="cal-nav"><button type="button" class="icon-btn" data-cal="prev" aria-label="${month ? 'Предыдущий месяц' : 'Предыдущий год'}">${ICON.left}</button><b aria-live="polite">${title}</b><button type="button" class="icon-btn" data-cal="next" aria-label="${month ? 'Следующий месяц' : 'Следующий год'}">${ICON.right}</button></div>
       ${body}
       <p class="cal-sum">${month ? `В ${MONP[m]}${y !== thisYear ? ' ' + y : ''}` : `В ${y} году`}: ${sum} ${plural(sum, DAYS)}</p>
-      <p class="hint">Отметить можно сегодня, вчера и позавчера.</p>
+      <p class="hint">${readOnly() ? 'Отмечать дни сейчас нельзя: доступ приостановлен.' : 'Отметить можно сегодня, вчера и позавчера.'}</p>
     </div></div>`;
   const el = sel && calDlg.querySelector(sel);
   if(el) el.focus();
@@ -1812,7 +1930,7 @@ calDlg.addEventListener('click', async e => {
     else { const d = new Date(CAL.y, CAL.m + k, 1); CAL.y = d.getFullYear(); CAL.m = d.getMonth(); }
   } else if(act === 'toggle'){
     const iso = b.dataset.date;
-    if(!canMark(iso)) return;
+    if(!canMark(iso) || readOnly()) return;
     b.disabled = true;
     try { await toggleDay(iso); } catch(err){ toast(errText(err)); }
   }
@@ -2019,6 +2137,11 @@ document.addEventListener('input', e => {
 });
 document.addEventListener('toggle', e => {
   if(e.target.id === 'arch-fold') UI.archOpen = e.target.open;
+  if(e.target.id === 'users-fold') UI.usersOpen = e.target.open;
+  if(e.target.id === 'inv-fold') UI.invOpen = e.target.open;
+  if(e.target.classList && e.target.classList.contains('usr-more')){
+    if(e.target.open) UI.openUser = e.target.dataset.user; else if(UI.openUser === e.target.dataset.user) UI.openUser = '';
+  }
 }, true);
 
 /* ---------- Вход и регистрация ---------- */
@@ -2112,6 +2235,7 @@ $('#auth').addEventListener('submit', async e => {
       if(!v('a-email') || !v('a-pass')) throw {msg:'Введите почту и пароль.'};
       try { await pb.collection('users').authWithPassword(v('a-email'), f.querySelector('#a-pass').value); }
       catch(err){ if(err.status === 400) throw {msg:'Неверная почта или пароль.'}; throw err; }
+      saveLS('accHide', '');
       startApp();
     } else if(f.dataset.mode === 'register'){
       const pass = f.querySelector('#a-pass').value, pass2 = f.querySelector('#a-pass2').value;
@@ -2244,8 +2368,19 @@ async function accountAction(a, d){
         await pb.collection('users').authWithPassword(email, n1);
         toast('Пароль изменён'); render(); break;
       }
+      case 'acc': {
+        const note = ($('#un-' + d.id) || {}).value || '';
+        if(d.action === 'suspend' && !arm(a, 'Точно приостановить?')) return;
+        if(d.action === 'set' && !($('#ud-' + d.id) || {}).value){ toast('Выберите дату.'); return; }
+        a.disabled = true;
+        try {
+          await pb.send('/api/molitva/admin/access', {method: 'POST', body: {user: d.id, action: d.action, months: Number(d.months || 0), date: ($('#ud-' + d.id) || {}).value || '', note: note.trim()}});
+        } finally { a.disabled = false; }
+        UI.openUser = d.id;
+        await loadAdminUsers(); render(true); toast(ACC_DONE[d.action] || 'Сохранено'); break;
+      }
       case 'new-invite': {
-        const body = {code: inviteCode(), note: $('#i-note').value.trim(), max_uses: Number($('#i-max').value), uses: 0, expires: $('#i-exp').value};
+        const body = {code: inviteCode(), note: $('#i-note').value.trim(), max_uses: Number($('#i-max').value), uses: 0, expires: $('#i-exp').value, access_period: $('#i-period').value};
         const rec = await pb.collection('invites').create(body);
         S.invites.push(rec); render();
         copyText(`${location.origin}/?invite=${rec.code}`);
@@ -2257,7 +2392,7 @@ async function accountAction(a, d){
         await pb.collection('invites').delete(d.id);
         S.invites = S.invites.filter(i => i.id !== d.id); render(); break;
       }
-      case 'logout': pb.authStore.clear(); location.hash = ''; location.reload(); break;
+      case 'logout': saveLS('accHide', ''); pb.authStore.clear(); location.hash = ''; location.reload(); break;
       case 'delete-account': {
         if(!arm(a, 'Всё будет удалено. Нажмите ещё раз')) return;
         await pb.collection('users').delete(me().id);

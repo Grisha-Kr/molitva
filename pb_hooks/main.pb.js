@@ -34,9 +34,13 @@ onRecordCreateRequest((e) => {
       throw new BadRequestError("Срок действия приглашения истёк.");
     }
     e.record.set("role", "user");
+    // срок доступа задаёт приглашение, а не сам пользователь (правки 2.5)
+    e.record.set("access_until", require(`${__hooks}/access_lib.js`).untilFor(invite.getString("access_period")));
   } else {
     e.record.set("role", "admin");
+    e.record.set("access_until", "");
   }
+  e.record.set("suspended", false);
   if (!e.record.getString("verse_period")) e.record.set("verse_period", "daily");
   if (!e.record.getString("theme")) e.record.set("theme", "auto");
 
@@ -323,11 +327,11 @@ onRecordEnrich((e) => {
   e.next();
 }, "needs");
 
-// Другой пользователь: только имя и фото профиля. Почту видит лишь сам человек и суперпользователь.
+// Другой пользователь: только имя и фото профиля. Почту и срок доступа видит лишь сам человек и суперпользователь.
 onRecordEnrich((e) => {
   const auth = e.requestInfo.auth;
   if (!(auth && (auth.isSuperuser() || auth.id === e.record.id))) {
-    e.record.hide("email", "emailVisibility", "verified", "role", "verse_period", "theme", "created", "updated");
+    e.record.hide("email", "emailVisibility", "verified", "role", "verse_period", "theme", "created", "updated", "access_until", "suspended");
   }
   e.next();
 }, "users");
@@ -425,9 +429,12 @@ onRecordDelete((e) => {
 }, "users");
 
 const GROUP_AUTH = $apis.requireAuth("users");
+// Маршруты, которые что-то меняют, без доступа закрыты (guard из access_lib.js): создать группу, вступить,
+// новая ссылка, передать роль, исключить. Выход из группы открыт всегда.
 
 // Создать группу: создатель сразу становится участником.
 routerAdd("POST", "/api/molitva/groups", (e) => {
+  require(`${__hooks}/access_lib.js`).guard(e);
   const lib = require(`${__hooks}/lib.js`);
   const name = String((e.requestInfo().body || {}).name || "").trim();
   if (!name) throw new BadRequestError("Введите название группы.");
@@ -460,6 +467,7 @@ routerAdd("GET", "/api/molitva/join/{code}", (e) => {
   });
 }, GROUP_AUTH);
 routerAdd("POST", "/api/molitva/join/{code}", (e) => {
+  require(`${__hooks}/access_lib.js`).guard(e);
   const lib = require(`${__hooks}/lib.js`);
   const g = lib.groupByCode($app, e.request.pathValue("code"));
   if (!lib.isMember($app, g.id, e.auth.id)) {
@@ -474,6 +482,7 @@ routerAdd("POST", "/api/molitva/join/{code}", (e) => {
 
 // Новая ссылка: старая сразу перестаёт работать.
 routerAdd("POST", "/api/molitva/groups/{id}/link", (e) => {
+  require(`${__hooks}/access_lib.js`).guard(e);
   const lib = require(`${__hooks}/lib.js`);
   const g = lib.ownGroup($app, e.request.pathValue("id"), e.auth.id);
   g.set("invite_code", lib.newGroupCode());
@@ -483,6 +492,7 @@ routerAdd("POST", "/api/molitva/groups/{id}/link", (e) => {
 
 // Передать роль создателя другому участнику.
 routerAdd("POST", "/api/molitva/groups/{id}/owner", (e) => {
+  require(`${__hooks}/access_lib.js`).guard(e);
   const lib = require(`${__hooks}/lib.js`);
   const g = lib.ownGroup($app, e.request.pathValue("id"), e.auth.id);
   const user = String((e.requestInfo().body || {}).user || "");
@@ -494,6 +504,7 @@ routerAdd("POST", "/api/molitva/groups/{id}/owner", (e) => {
 
 // Исключить участника (только создатель).
 routerAdd("POST", "/api/molitva/groups/{id}/remove", (e) => {
+  require(`${__hooks}/access_lib.js`).guard(e);
   const lib = require(`${__hooks}/lib.js`);
   const g = lib.ownGroup($app, e.request.pathValue("id"), e.auth.id);
   const user = String((e.requestInfo().body || {}).user || "");

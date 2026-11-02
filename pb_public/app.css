@@ -18,6 +18,7 @@
   --accent:#4E5A2C; --on-accent:#FFFFFF; --accent-text:#4E5A2C; --soft:#E3E6D6; --soft-ink:#3A4420;
   --danger:#A23B2A; --stone-empty:#EDEAE3; --stone-shadow:rgba(0,0,0,.22);
   --verse-bg:#E9ECDD; --verse-ink:#2E3518; --verse-ref:#4E5A2C; --water-ink:#1F4A66; --water-add:.28;
+  --warn-bg:#F6E7C4; --warn-ink:#6E4B05;
   --f-head:"Lora", Georgia, "Times New Roman", serif;
   --f-body:"Manrope", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   --col:520px;
@@ -29,6 +30,7 @@
   --accent:#A9B972; --on-accent:#1B1F0E; --accent-text:#B9C77F; --soft:#30361F; --soft-ink:#CFDB9E;
   --danger:#E58A78; --stone-empty:#8D8A80; --stone-shadow:rgba(0,0,0,.5);
   --verse-bg:#2B301F; --verse-ink:#E4EACB; --verse-ref:#B9C77F; --water-ink:#B5D5EA; --water-add:.45;
+  --warn-bg:#3A3018; --warn-ink:#E9C77A;
   color-scheme:dark;
 }}
 :root[data-theme="dark"]{
@@ -37,6 +39,7 @@
   --accent:#A9B972; --on-accent:#1B1F0E; --accent-text:#B9C77F; --soft:#30361F; --soft-ink:#CFDB9E;
   --danger:#E58A78; --stone-empty:#8D8A80; --stone-shadow:rgba(0,0,0,.5);
   --verse-bg:#2B301F; --verse-ink:#E4EACB; --verse-ref:#B9C77F; --water-ink:#B5D5EA; --water-add:.45;
+  --warn-bg:#3A3018; --warn-ink:#E9C77A;
   color-scheme:dark;
 }
 
@@ -69,6 +72,19 @@ main{max-width:var(--col);margin:0 auto;padding:calc(16px + env(safe-area-inset-
 .notice > div{background:color-mix(in srgb,var(--danger) 12%,var(--card));border:1px solid color-mix(in srgb,var(--danger) 35%,var(--line));border-radius:12px;padding:12px 14px}
 .update-bar > div{display:flex;align-items:center;gap:10px;flex-wrap:wrap;background:var(--soft);color:var(--soft-ink);border-radius:12px;padding:6px 6px 6px 14px}
 .update-bar span{flex:1;min-width:150px;font-weight:600}
+/* Срок доступа (правки 2.5): полоска вверху, строка в профиле, раздел «Пользователи» */
+.access-bar{max-width:var(--col);margin:12px auto 0;padding:0 20px}
+.access-bar > div{display:flex;align-items:flex-start;gap:6px;background:var(--soft);color:var(--soft-ink);border-radius:12px;padding:10px 4px 10px 14px}
+.access-bar.off > div{background:color-mix(in srgb,var(--danger) 12%,var(--card));color:var(--ink);border:1px solid color-mix(in srgb,var(--danger) 35%,var(--line))}
+.access-bar p{flex:1;min-width:0;font-size:14px;line-height:1.5;padding-top:2px;overflow-wrap:anywhere}
+.access-bar a{color:inherit;font-weight:700}
+.access-bar .icon-btn{width:36px;height:36px;font-size:22px;color:inherit;margin-top:-6px}
+.acc-line{font-size:14px;line-height:1.5;color:var(--muted);overflow-wrap:anywhere}
+.acc-line.off{color:var(--danger)}
+.tag{display:inline-flex;align-items:center;border-radius:999px;padding:1px 9px;font-size:12px;font-weight:700;background:var(--dot-off);color:var(--muted);white-space:normal}
+.tag.ok{background:var(--soft);color:var(--soft-ink)}
+.tag.warn{background:var(--warn-bg);color:var(--warn-ink)}
+.tag.bad{background:color-mix(in srgb,var(--danger) 14%,var(--card));color:var(--danger)}
 
 /* Шапки экранов */
 .head{display:flex;align-items:center;justify-content:space-between;gap:12px;min-height:44px}
@@ -305,6 +321,20 @@ input:focus,select:focus,textarea:focus{outline:2px solid color-mix(in srgb,var(
 .inv code{font-size:17px;font-weight:700;letter-spacing:.08em;font-family:ui-monospace,Menlo,Consolas,monospace}
 .inv .muted{font-size:13px}
 .inv .acts{display:flex;gap:6px;flex-wrap:wrap}
+.users{display:flex;flex-direction:column}
+.usr{display:flex;flex-direction:column;gap:10px;padding:14px 0;border-top:1px solid var(--line)}
+.usr:first-child{border-top:0;padding-top:4px}
+.usr-head{display:flex;gap:12px;align-items:flex-start}
+.usr-head .face{width:40px;height:40px;font-size:16px}
+.usr-main{display:flex;flex-direction:column;align-items:flex-start;gap:3px;min-width:0}
+.usr-main b{overflow-wrap:anywhere}
+.usr-main .muted{font-size:13px;overflow-wrap:anywhere}
+.usr-acts,.usr-btns{display:flex;gap:6px;flex-wrap:wrap}
+.usr-more > summary{cursor:pointer;color:var(--accent-text);font-size:14px;font-weight:700;min-height:44px;display:flex;align-items:center}
+.usr-more[open]{display:flex;flex-direction:column;gap:12px}
+.usr-row{display:flex;flex-direction:column;gap:8px}
+.usr-log{margin:0;padding-left:18px;display:flex;flex-direction:column;gap:4px;font-size:13px;line-height:1.45;overflow-wrap:anywhere}
+.usr-log .d{font-weight:700}
 .form-err{color:var(--danger);font-size:14px}
 .form-ok{color:var(--accent-text);font-size:14px}
 .answers{display:flex;flex-direction:column;gap:8px}
