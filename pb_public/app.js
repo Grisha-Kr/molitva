@@ -18,7 +18,7 @@ const MB = 1024*1024;
 const MAX_PHOTO = 10*MB;
 const PBN = {sections:'sections', needs:'needs', prayers:'prayers', verses:'verses', days:'prayer_days', daily:'daily_verses',
   groups:'groups', gmembers:'group_members', glinks:'group_needs', gpray:'group_praying', gdays:'group_days', people:'users', shared:'needs',
-  materials:'materials', marks:'material_marks'};
+  materials:'materials', marks:'material_marks', msgs:'messages', mreplies:'message_replies'};
 const KEYS = Object.keys(PBN);
 // Группы: needs = свои нужды, shared = чужие нужды из общих групп (только чтение), people = участники общих групп,
 // gpray = отметки «Помолился» у общих нужд (с датой), gdays = дни молитвы участников в группах (ставит сервер)
@@ -57,15 +57,21 @@ const ICON = {
   pin: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 4h6l-1 6 3 3H7l3-3z"/><path d="M12 13v7"/></svg>',
   play: '<svg viewBox="0 0 24 24" aria-hidden="true"><path class="fill" d="M8 5.5l11 6.5-11 6.5z"/></svg>',
   pause: '<svg viewBox="0 0 24 24" aria-hidden="true"><path class="fill" d="M7 5h3.5v14H7zM13.5 5H17v14h-3.5z"/></svg>',
+  // сообщения: конверт, облачко, картинка, копия, лоток
+  mail: '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="5.5" width="18" height="13" rx="2.5"/><path d="M4 7.5l8 6 8-6"/></svg>',
+  chat: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5.5 5h13A2.5 2.5 0 0 1 21 7.5v7a2.5 2.5 0 0 1-2.5 2.5H11l-4.5 3.5V17h-1A2.5 2.5 0 0 1 3 14.5v-7A2.5 2.5 0 0 1 5.5 5z"/></svg>',
+  copy: '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="8.5" y="8.5" width="11" height="11" rx="2"/><path d="M15.5 8.5v-2a2 2 0 0 0-2-2h-7a2 2 0 0 0-2 2v7a2 2 0 0 0 2 2h2"/></svg>',
+  inbox: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 13l2.5-7.5h11L20 13v5.5H4z"/><path d="M4 13h4.5l1 2.5h5l1-2.5H20"/></svg>',
   eyeOff: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12z"/><circle cx="12" cy="12" r="3"/><path d="M4 4l16 16"/></svg>'
 };
 
 /* ---------- Состояние ---------- */
 const S = {sections:[], needs:[], prayers:[], verses:[], days:[], daily:[], invites:[], usage:null, loaded:false,
-  groups:[], gmembers:[], glinks:[], gpray:[], gdays:[], people:[], shared:[], materials:[], marks:[], mediaUsage:null, access:null, adminUsers:null, ginv:[]};
+  groups:[], gmembers:[], glinks:[], gpray:[], gdays:[], people:[], shared:[], materials:[], marks:[], mediaUsage:null, access:null, adminUsers:null, ginv:[],
+  msgs:[], mreplies:[]}; // сообщения администратору и ответы (правки 2.7): у пользователя свои, у администратора все
 const loadLS = (k, d) => { try { const v = localStorage.getItem('mol_'+k); return v == null ? d : JSON.parse(v); } catch(e){ return d; } };
 const saveLS = (k, v) => { try { localStorage.setItem('mol_'+k, JSON.stringify(v)); } catch(e){} };
-const UI = {reorder:'', form:null, hops:0, verseDay:undefined, verseAt:0, join:null, archOpen:false, up:0, openUser:'', usersOpen:false, invOpen:false};
+const UI = {reorder:'', form:null, hops:0, verseDay:undefined, verseAt:0, join:null, archOpen:false, up:0, openUser:'', usersOpen:false, invOpen:false, shots:{}, msgSeen:{}, msgDraft:{}};
 const pb = new PocketBase(location.origin);
 pb.autoCancellation(false);
 const me = () => pb.authStore.record || {};
@@ -149,8 +155,10 @@ const ID_ABC = 'abcdefghijklmnopqrstuvwxyz0123456789';
 function newId(){ const a = new Uint8Array(15); crypto.getRandomValues(a); return Array.from(a, x => ID_ABC[x % 36]).join(''); }
 const SKIP = new Set(['id','owner','user','collectionId','collectionName','created','updated','expand']);
 function clean(d){ const o = {}; for(const [k, v] of Object.entries(d || {})) if(!SKIP.has(k) && v !== undefined) o[k] = v; return o; }
-function upsert(key, rec){ const arr = S[key]; const i = arr.findIndex(x => x.id === rec.id); if(i >= 0) arr[i] = {...rec}; else arr.push({...rec}); schedule(); }
-function removeLocal(key, id){ S[key] = S[key].filter(x => x.id !== id); schedule(); }
+// dirtyAt: когда запись ключа меняли на устройстве (см. loadAll)
+const dirtyAt = {};
+function upsert(key, rec){ dirtyAt[key] = performance.now(); const arr = S[key]; const i = arr.findIndex(x => x.id === rec.id); if(i >= 0) arr[i] = {...rec}; else arr.push({...rec}); schedule(); }
+function removeLocal(key, id){ dirtyAt[key] = performance.now(); S[key] = S[key].filter(x => x.id !== id); schedule(); }
 function col(key){
   const c = pb.collection(PBN[key]);
   return { doc(id){
@@ -167,14 +175,19 @@ function col(key){
 // Молитва в группах: отметки нужд со вчерашнего дня (на случай смены даты), дни группы с понедельника.
 const LIST_FILTER = {needs: () => pb.filter('owner = {:me}', {me: me().id}), shared: () => pb.filter('owner != {:me}', {me: me().id}),
   gpray: () => pb.filter('date >= {:d}', {d: addDays(todayISO(), -1)}), gdays: () => pb.filter('date >= {:d}', {d: weekStart()})};
-async function loadAll(keys = KEYS){
+async function loadAll(keys = KEYS, again = 0){
+  const t0 = performance.now();
   const res = await Promise.all(keys.map(k => {
     const p = pb.collection(PBN[k]).getFullList({batch: 500, ...(LIST_FILTER[k] ? {filter: LIST_FILTER[k]()} : {})});
     // без доступа сервер материалы не отдаёт (403): остальное загружается как обычно
     return k === 'materials' ? p.catch(e => { if(e && e.status === 403) return []; throw e; }) : p;
   }));
-  keys.forEach((k, n) => { S[k] = res[n]; });
+  // пока шла загрузка, запись могли добавить или изменить (например, отправили сообщение сразу после запуска):
+  // такой список с сервера уже устарел, его не берём, а перечитываем заново
+  const stale = [];
+  keys.forEach((k, n) => { if(again < 2 && (dirtyAt[k] || 0) > t0) stale.push(k); else S[k] = res[n]; });
   schedule();
+  if(stale.length) await loadAll(stale, again + 1);
 }
 // Изменилось что-то в группах: доступ к чужим нуждам и участникам мог появиться или пропасть, перечитываем всё групповое
 let gTimer = 0;
@@ -224,6 +237,7 @@ async function startApp(){
     if(route().name === 'profile') loadProfileExtras();
     touchMaterial();
     loadInvites();
+    if(isAdmin()) loadAdminUsers(); // имена и фото для «Сообщений пользователей»
     const join = loadLS('join', '');
     if(join){ saveLS('join', ''); go('#/join/' + encodeURIComponent(join)); }
     subscribeAll().catch(() => {});
@@ -281,15 +295,22 @@ async function loadAccess(){
   schedule();
 }
 // Без доступа вкладка «Материалы» закрыта целиком
-const matClosed = () => `<section class="card"><p class="empty">Материалы доступны при действующем доступе. Чтобы продлить, напишите: ${contactHTML(S.access && S.access.contact)}</p></section>`;
+const matClosed = () => `<section class="card"><p class="empty">Материалы доступны при действующем доступе. Чтобы продлить, напишите: ${renewHTML(S.access)}</p></section>`;
+// Как связаться, чтобы продлить (правки 2.7): почта, «Скопировать почту» и «или напишите здесь»
+// (окно «Написать администратору» сразу с темой «Продление доступа или пожертвование»)
+function renewHTML(a){
+  const c = a && a.contact, mail = /^[^\s@]+@[^\s@]+$/.test(c || '');
+  const here = isAdmin() ? '' : ` <button type="button" class="linkish" data-msgw="renew">${mail ? 'или напишите здесь' : 'здесь, в приложении'}</button>`;
+  return mail ? `${contactHTML(c)} <button type="button" class="mail-copy" data-cpmail="${esc(c)}" title="Скопировать почту">${ICON.copy}<span>Скопировать почту</span></button>${here}` : `${esc(c || 'администратору')}${here}`;
+}
 const accKey = a => [me().id, a.reason, a.until].join('|');
 function renderAccessBar(){
   const a = S.access, bar = $('#access-bar');
   let html = '';
   if(a && !a.active){
-    html = `<b>Доступ приостановлен${a.reason === 'expired' ? ` (срок закончился ${fmtDay(a.until)})` : ''}.</b> Можно смотреть записи, а добавлять и менять нельзя. Чтобы продлить, напишите: ${contactHTML(a.contact)}`;
+    html = `<b>Доступ приостановлен${a.reason === 'expired' ? ` (срок закончился ${fmtDay(a.until)})` : ''}.</b> Можно смотреть записи, а добавлять и менять нельзя. Чтобы продлить, напишите: ${renewHTML(a)}`;
   } else if(a && a.until && !a.admin && daysLeft(a) <= 7){
-    html = `Доступ действует до ${fmtDay(a.until)} (${leftText(daysLeft(a))}). Чтобы продлить, напишите: ${contactHTML(a.contact)}`;
+    html = `Доступ действует до ${fmtDay(a.until)} (${leftText(daysLeft(a))}). Чтобы продлить, напишите: ${renewHTML(a)}`;
   }
   bar.classList.toggle('off', !!(a && !a.active));
   $('#access-text').innerHTML = html;
@@ -300,7 +321,7 @@ function accessLine(){
   const a = S.access;
   if(!a) return '';
   if(a.admin) return 'Вы администратор, доступ бессрочный.';
-  if(!a.active) return `Доступ приостановлен${a.reason === 'expired' ? ` (срок закончился ${fmtDay(a.until)})` : ''}: можно смотреть записи, а добавлять и менять нельзя. Чтобы продлить, напишите: ${contactHTML(a.contact)}`;
+  if(!a.active) return `Доступ приостановлен${a.reason === 'expired' ? ` (срок закончился ${fmtDay(a.until)})` : ''}: можно смотреть записи, а добавлять и менять нельзя. Чтобы продлить, напишите: ${renewHTML(a)}`;
   return a.until ? `Доступ действует до ${fmtDay(a.until)} включительно.` : 'Доступ бессрочный.';
 }
 
@@ -321,13 +342,16 @@ window.addEventListener('hashchange', () => { UI.hops++; UI.reorder = ''; closeM
 /* ---------- Отрисовка ---------- */
 function render(force){
   const r = route();
-  const tab = ['profile','verses','answers'].includes(r.name) ? 'profile'
+  const tab = ['profile','verses','answers','msgs','msg'].includes(r.name) ? 'profile'
     : ['materials','m'].includes(r.name) ? 'materials'
     : ['groups','g','gn','join'].includes(r.name) || (r.name === 'n' && r.q.get('g')) ? 'groups' : 'diary';
   document.querySelectorAll('.tab').forEach(t => t.setAttribute('aria-current', t.dataset.tab === tab ? 'page' : 'false'));
   // точка на «Группах», пока есть приглашения без ответа
   const gt = $('.tab[data-tab="groups"]');
   if(gt){ gt.classList.toggle('has-dot', S.ginv.length > 0); gt.setAttribute('aria-label', S.ginv.length ? 'Группы, есть приглашения' : 'Группы'); }
+  // точка на «Профиле»: у пользователя новый ответ администратора, у администратора новое сообщение или новый ответ
+  const pt = $('.tab[data-tab="profile"]'), pn = msgNew();
+  if(pt){ pt.classList.toggle('has-dot', pn > 0); pt.setAttribute('aria-label', pn ? (isAdmin() ? 'Профиль, есть новые сообщения' : 'Профиль, есть ответ администратора') : 'Профиль'); }
   const m = $('#main');
   if(calDlg.open) renderCal();
   if(!S.loaded){ m.innerHTML = '<div class="loading">Загружаю…</div>'; return; }
@@ -338,8 +362,11 @@ function render(force){
   if(r.name === 'm' && !force && (UI.up || $('#main [data-player]'))) return;
   if(!isForm) UI.form = null;
   const views = {home:vHome, s:vSection, n:vNeed, new:vSectionForm, edit:vSectionForm, verses:vVerses, answers:vAnswers, profile:vProfile,
-    groups:vGroups, g:vGroup, gn:vGroupNeed, join:vJoin, materials:vMaterials, m:vMaterial};
+    groups:vGroups, g:vGroup, gn:vGroupNeed, join:vJoin, materials:vMaterials, m:vMaterial, msgs:vMsgs, msg:vMsg};
+  // ответ в переписке пишут, пока приходят живые обновления: курсор в поле остаётся на месте
+  const ae = document.activeElement, keep = ae && ae.id === 'msg-reply' ? [ae.selectionStart, ae.selectionEnd] : null;
   m.innerHTML = (views[r.name] || vHome)(r);
+  if(keep){ const t = $('#msg-reply'); if(t){ t.focus(); try { t.setSelectionRange(keep[0], keep[1]); } catch(e){} } }
   if(r.name === 'm'){ setupPlayer(); if(isAdmin() && !S.mediaUsage) loadMediaUsage(); } else if(PL.id) stopPlayer();
 }
 const notFound = () => `<div class="card"><p>Запись не найдена: возможно, её уже удалили.</p><a class="btn" href="#/">На главную</a></div>`;
@@ -1365,6 +1392,237 @@ window.addEventListener('hashchange', touchMaterial);
 // На аудио, видео и обложках контекстное меню (правая кнопка, долгое нажатие) не открывается
 document.addEventListener('contextmenu', e => { if(e.target.closest('.mat-cover, .mat-pic, .mat-media, audio, video')) e.preventDefault(); });
 
+/* ---------- Сообщения администратору (правки 2.7, часть А, по образцу «Библиотеки») ---------- */
+// Пользователь пишет из профиля («Написать администратору») или из полоски срока («или напишите здесь»),
+// видит свои переписки в «Мои сообщения». Администратор читает и отвечает в «Сообщения пользователей»
+// (входящие и архив). Сообщения и ответы приходят вместе с остальными данными (msgs, mreplies) и живыми
+// обновлениями, пишет их только сервер (маршруты /api/molitva/messages…). Писем нет: о новом говорят точки.
+const MSG_TOPICS = [['offer', 'Предложение'], ['problem', 'Что-то неудобно или не работает'], ['review', 'Отзыв'], ['renew', 'Продление доступа или пожертвование'], ['other', 'Другое']];
+const msgTopic = k => (MSG_TOPICS.find(t => t[0] === k) || [k, 'Сообщение'])[1];
+const MSG_MAX = 1000, SHOT_SIDE = 1600, SHOT_IN_MAX = 30 * MB;
+const msgLen = t => Array.from(String(t || '')).length;
+const msgCount = t => `${msgLen(t)} из ${MSG_MAX}`;
+const msgById = id => S.msgs.find(m => m.id === id);
+const msgReplies = id => S.mreplies.filter(r => r.message === id).sort(byCreated);
+const byLast = (a, b) => String(b.last_at || b.created).localeCompare(String(a.last_at || a.created));
+// Сколько нового: у администратора сообщения в состоянии «Новое», у пользователя ответы, которые он ещё не открыл
+const msgNew = () => isAdmin() ? S.msgs.filter(m => m.status === 'new').length : S.msgs.filter(m => m.user_unread && m.author === me().id).length;
+// Автор сообщения для администратора: из списка пользователей (с фото), иначе имя и почта на момент отправки
+const msgUser = m => (S.adminUsers && S.adminUsers.users.find(u => u.id === m.author)) || {id: m.author, name: m.author_name, email: m.author_email, avatar: ''};
+const MSG_ST = {new: ['Новое', 'new'], read: ['Прочитано', ''], answered: ['Отвечено', 'ok']};
+const msgStTag = m => { const st = MSG_ST[m.status] || MSG_ST.new; return `<span class="tag ${st[1]}">${st[0]}</span>`; };
+const msgText = t => esc(t).replace(/\n/g, '<br>');
+const msgExcerpt = t => { const x = String(t || '').replace(/\s+/g, ' ').trim(); return x.length > 140 ? x.slice(0, 140).trim() + '…' : x; };
+function fmtWhen(s){
+  const d = new Date(String(s || '').replace(' ', 'T'));
+  return isNaN(d) ? '' : `${fmtDay(isoOf(d))}, ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+function fmtDayY(s){
+  const d = new Date(String(s || '').replace(' ', 'T'));
+  return isNaN(d) ? '' : `${d.getDate()} ${MONF[d.getMonth()]} ${d.getFullYear()}`;
+}
+
+// Снимок экрана: открываем в браузере, уменьшаем до 1600 точек по длинной стороне и сохраняем в JPEG (до 500 КБ)
+async function shotPrepare(file){
+  if(file.size > SHOT_IN_MAX) throw new Error('Картинка больше 30 МБ. Выберите снимок поменьше.');
+  const ext = (file.name.split('.').pop() || '').toLowerCase();
+  let img = null;
+  try { img = await createImageBitmap(file); }
+  catch(e){
+    try { img = await new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = rej; i.src = URL.createObjectURL(file); }); }
+    catch(e2){ img = null; }
+  }
+  if(!img) throw new Error(['heic', 'heif'].includes(ext) ? 'Это снимок в формате HEIC: этот браузер его не открывает. Выберите снимок в формате JPG или PNG.' : 'Эту картинку не удалось открыть. Выберите снимок в формате JPG, PNG или WEBP.');
+  const W = img.width || img.naturalWidth, H = img.height || img.naturalHeight;
+  const k = Math.min(1, SHOT_SIDE / Math.max(W, H));
+  const cv = document.createElement('canvas'); cv.width = Math.max(1, Math.round(W * k)); cv.height = Math.max(1, Math.round(H * k));
+  const g = cv.getContext('2d'); g.fillStyle = '#fff'; g.fillRect(0, 0, cv.width, cv.height); g.imageSmoothingQuality = 'high';
+  g.drawImage(img, 0, 0, cv.width, cv.height);
+  if(img.close) img.close();
+  let blob = null;
+  for(const q of [0.85, 0.78, 0.7, 0.6, 0.5, 0.4]){ blob = await new Promise(res => cv.toBlob(res, 'image/jpeg', q)); if(blob && blob.size <= 500 * 1024) break; }
+  if(!blob || blob.size > 2 * MB) throw new Error('Не удалось уменьшить снимок. Выберите другой.');
+  return {blob, url: URL.createObjectURL(blob), w: cv.width, h: cv.height};
+}
+
+// Окно «Написать администратору» (topic: тема заранее, например renew из полоски срока)
+function msgWrite(topic){
+  if(isAdmin()) return;
+  let shot = null;
+  const paint = () => {
+    const box = $('#mw-shot'); if(!box) return;
+    box.innerHTML = shot ? `<span class="mw-prev"><img src="${esc(shot.url)}" alt="Снимок экрана"><button type="button" class="mw-x" data-dlg="mw-unshot" aria-label="Убрать снимок" title="Убрать">×</button></span><small class="hint">Снимок экрана, ${fsize(shot.blob.size)}</small>`
+      : `<button type="button" class="btn sm" data-dlg="mw-shot">${ICON.photo}<span>Приложить снимок экрана</span></button>`;
+  };
+  const drop = () => { if(shot) URL.revokeObjectURL(shot.url); shot = null; };
+  openForm({title: 'Написать администратору',
+    html: `<div class="field"><label for="mw-topic">Тема</label><select id="mw-topic"><option value=""${topic ? '' : ' selected'} disabled>Выберите тему</option>${MSG_TOPICS.map(([k, l]) => `<option value="${k}"${k === topic ? ' selected' : ''}>${esc(l)}</option>`).join('')}</select></div>
+      <div class="field"><label for="mw-text">Сообщение</label><textarea id="mw-text" rows="6" maxlength="${MSG_MAX}" placeholder="Напишите, что хотите сказать или спросить"></textarea><small class="cnt" id="mw-cnt">${msgCount('')}</small></div>
+      <div class="mw-shot" id="mw-shot"></div>
+      <p class="hint">Снимок по желанию, один на сообщение. Его увидите только вы и администратор.</p>`,
+    submit: 'Отправить',
+    onInput(t){ if(t.id === 'mw-text'){ const c = $('#mw-cnt'); c.textContent = msgCount(t.value); c.classList.toggle('over', msgLen(t.value) > MSG_MAX); } },
+    onClick(b){
+      if(b.dataset.dlg === 'mw-unshot'){ drop(); paint(); return; }
+      if(b.dataset.dlg === 'mw-shot') pickPhoto(async f => {
+        formErr(''); const box = $('#mw-shot'); if(box) box.innerHTML = '<small class="hint">Готовлю снимок…</small>';
+        try { const s2 = await shotPrepare(f); drop(); shot = s2; } catch(err){ formErr(err.message || 'Не удалось открыть картинку.'); }
+        paint();
+      });
+    },
+    async onSave(){
+      const tp = $('#mw-topic').value, text = $('#mw-text').value.trim();
+      if(!tp) throw new Error('Выберите тему.');
+      if(!text) throw new Error('Напишите текст сообщения.');
+      if(msgLen(text) > MSG_MAX) throw new Error(`Текст длиннее ${MSG_MAX} знаков.`);
+      const fd = new FormData();
+      fd.append('topic', tp); fd.append('text', text);
+      if(shot) fd.append('shot', new File([shot.blob], 'snimok.jpg', {type: 'image/jpeg'}));
+      const rec = await pb.send('/api/molitva/messages', {method: 'POST', body: fd});
+      upsert('msgs', rec);
+      thenOpen(() => info('Сообщение отправлено', 'Ответ появится в разделе «Мои сообщения».'));
+    },
+    onClose(){ drop(); }});
+  paint();
+}
+
+// Ссылка на снимок (защищённая, на 2 часа, с кукой): берётся при первом показе и хранится в памяти
+function shotSrc(m){
+  const c = UI.shots[m.id];
+  if(c && c.url && Date.now() - c.at < 100 * 60e3) return c.url;
+  if(!c || (!c.busy && !c.err)){
+    UI.shots[m.id] = {busy: true};
+    pb.send(`/api/molitva/messages/${m.id}/shot`, {}).then(l => { UI.shots[m.id] = {url: l.url, at: Date.now()}; schedule(); })
+      .catch(err => { UI.shots[m.id] = {err: errText(err)}; schedule(); });
+  }
+  return '';
+}
+function shotHTML(m){
+  if(!m.shot) return '';
+  const src = shotSrc(m), c = UI.shots[m.id] || {};
+  return `<button type="button" class="msg-shot" data-act="msg-shot" data-id="${esc(m.id)}" aria-label="Открыть снимок крупно" title="Открыть снимок крупно">${src ? `<img src="${esc(src)}" alt="Снимок экрана">` : `<span class="hint">${c.err ? esc(c.err) : 'Загружаю снимок…'}</span>`}</button>`;
+}
+function shotOpen(id){
+  const c = UI.shots[id]; if(!c || !c.url) return;
+  const d = $('#shot'); $('#shot-img').src = c.url;
+  if(!d.open) d.showModal();
+}
+$('#shot').addEventListener('click', () => $('#shot').close());
+
+// «Ответить по почте»: новое письмо пользователю с темой и цитатой его текста
+function msgMailto(m){
+  const u = msgUser(m), name = (u.name || '').trim();
+  const quote = String(m.text || '').split('\n').map(l => '> ' + l).join('\n');
+  const body = `Здравствуйте${name ? ', ' + name : ''}.\n\n\n\nВы писали в Молитвенном дневнике ${fmtDayY(m.created)}:\n${quote}\n`;
+  // русские буквы и переносы строк кодируются в UTF-8 (перенос %0D%0A): так их понимает «Почта» на iPhone и Mac
+  return `mailto:${u.email || m.author_email || ''}?subject=${encodeURIComponent('Ваше сообщение в Молитвенном дневнике: ' + msgTopic(m.topic))}&body=${encodeURIComponent(body.replace(/\n/g, '\r\n'))}`;
+}
+
+function vMsgs(r){
+  if(isAdmin()) return msgsAdmin(r);
+  const list = S.msgs.filter(m => m.author === me().id).sort(byLast);
+  return `<div class="nav-head">${backLink('#/profile', 'Профиль')}</div>
+    <div><h1 class="title">Мои сообщения</h1><p class="lead">Ваши сообщения администратору и его ответы.</p></div>
+    <button type="button" class="btn primary" data-act="msg-write">${ICON.mail}<span>Написать администратору</span></button>
+    ${list.length ? `<div class="msg-list">${list.map(m => `<a class="msg-row${m.user_unread ? ' unread' : ''}" href="#/msg/${esc(m.id)}">
+      <span class="msg-row-t"><b>${esc(msgTopic(m.topic))}</b><small>${esc(fmtWhen(m.created))}${m.shot ? ` · ${ICON.photo}<span class="sr">есть снимок</span>` : ''}</small></span>
+      <span class="msg-ex">${esc(msgExcerpt(m.text))}</span>
+      ${m.answers ? `<span class="msg-tags"><span class="tag ${m.user_unread ? 'new' : 'ok'}">${m.user_unread ? 'Новый ответ' : 'Есть ответ'}</span></span>` : ''}</a>`).join('')}</div>`
+      : '<p class="hint">Сообщений пока нет. Ответ администратора появится здесь.</p>'}`;
+}
+function msgsAdmin(r){
+  const uid = r.q.get('user') || '', box = r.q.get('box') === 'archive' ? 'archive' : 'inbox';
+  const all = S.msgs.slice().sort(byLast);
+  const list = uid ? all.filter(m => m.author === uid) : all.filter(m => !!m.archived === (box === 'archive'));
+  const inboxN = all.filter(m => !m.archived).length, archN = all.length - inboxN;
+  const u = uid ? msgUser(list[0] || {author: uid}) : null;
+  const tabs = uid ? `<p class="hint">Все сообщения пользователя, в том числе из архива. <a href="#/msgs">Все сообщения пользователей</a></p>`
+    : `<div class="msg-tabs" role="tablist">${[['inbox', 'Входящие', inboxN], ['archive', 'Архив', archN]].map(([k, l, n]) => `<a role="tab" href="#/msgs${k === 'archive' ? '?box=archive' : ''}" aria-selected="${k === box}">${l}${n ? ` <span class="n">${n}</span>` : ''}</a>`).join('')}</div>`;
+  return `<div class="nav-head">${backLink('#/profile', 'Профиль')}</div>
+    <div><h1 class="title">${uid ? 'Сообщения: ' + esc(u.name || u.email || 'пользователь') : 'Сообщения пользователей'}</h1></div>
+    ${tabs}
+    ${list.length ? `<div class="msg-list">${list.map(m => { const w = msgUser(m);
+      return `<a class="msg-row adm${m.status === 'new' ? ' unread' : ''}" href="#/msg/${esc(m.id)}">
+      <span class="msg-who">${userFace(w)}<span><b>${esc(w.name || w.email || 'Пользователь')}</b><small>${esc(w.email || '')}</small></span></span>
+      <span class="msg-row-t"><b>${esc(msgTopic(m.topic))}</b><small>${esc(fmtWhen(m.last_at || m.created))}${m.shot ? ` · ${ICON.photo}<span class="sr">есть снимок</span>` : ''}</small></span>
+      <span class="msg-ex">${esc(msgExcerpt(m.text))}</span>
+      <span class="msg-tags">${msgStTag(m)}${m.archived && uid ? '<span class="tag">в архиве</span>' : ''}</span></a>`; }).join('')}</div>`
+      : `<p class="hint">${uid ? 'Этот пользователь пока ничего не писал.' : box === 'archive' ? 'В архиве пусто.' : 'Сообщений нет.'}</p>`}`;
+}
+// Переписка. Пользователь, открыв её, снимает точку «есть ответ».
+function vMsg(r){
+  const m = msgById(r.id);
+  const admin = isAdmin();
+  const back = `<div class="nav-head">${backLink(admin && m && m.archived ? '#/msgs?box=archive' : '#/msgs', admin ? 'Сообщения пользователей' : 'Мои сообщения')}</div>`;
+  if(!m) return back + '<div class="card"><p>Сообщение не найдено: возможно, его удалили.</p></div>';
+  if(!admin && m.user_unread && UI.msgSeen[m.id] !== m.answers){
+    UI.msgSeen[m.id] = m.answers;
+    pb.send(`/api/molitva/messages/${m.id}/seen`, {method: 'POST'}).then(rec => upsert('msgs', rec)).catch(() => { UI.msgSeen[m.id] = -1; });
+  }
+  const w = msgUser(m);
+  const who = x => x.admin ? (admin ? 'Вы' : 'Администратор') : (admin ? (w.name || w.email || 'Пользователь') : 'Вы');
+  const draft = UI.msgDraft[m.id] || '';
+  const bubble = (x, body) => `<article class="msg-b${x.admin ? ' adm' : ''}"><div class="msg-meta"><b>${esc(who(x))}</b><span>${esc(fmtWhen(x.created))}</span></div>${body}</article>`;
+  return `${back}<div><h1 class="title">${esc(msgTopic(m.topic))}</h1></div>
+    ${admin ? `<section class="card msg-from">${userFace(w)}<div class="who"><b>${esc(w.name || 'Без имени')}</b><span>${esc(w.email || '')}</span>
+      <span class="msg-tags">${msgStTag(m)}${m.archived ? '<span class="tag">в архиве</span>' : ''}</span></div>
+      <a class="usr-msgs" href="#/msgs?user=${esc(m.author)}">Все сообщения · ${S.msgs.filter(x => x.author === m.author).length}</a></section>` : ''}
+    <div class="msg-thread">
+      ${bubble({admin: false, created: m.created}, `<p class="msg-text">${msgText(m.text)}</p>${shotHTML(m)}`)}
+      ${msgReplies(m.id).map(x => bubble(x, `<p class="msg-text">${msgText(x.text)}</p>`)).join('')}
+    </div>
+    <section class="card msg-reply" id="msg-reply-box" data-id="${esc(m.id)}">
+      <div class="field"><label for="msg-reply">Ответить</label><textarea id="msg-reply" rows="4" maxlength="${MSG_MAX}" placeholder="${admin ? 'Ваш ответ пользователю' : 'Ваш ответ администратору'}">${esc(draft)}</textarea>
+        <small class="cnt${msgLen(draft) > MSG_MAX ? ' over' : ''}" id="msg-cnt">${msgCount(draft)}</small></div>
+      <div class="msg-acts"><button type="button" class="btn primary" data-act="msg-send" data-id="${esc(m.id)}">Ответить</button>
+        ${admin ? `<a class="btn" href="${esc(msgMailto(m))}" id="msg-mail">${ICON.mail}<span>Ответить по почте</span></a>` : ''}</div>
+      ${admin ? `<div class="msg-acts sub">${m.status === 'new' ? `<button type="button" class="btn sm" data-act="msg-st" data-id="${esc(m.id)}" data-st="read">${ICON.check}<span>Прочитано</span></button>` : ''}
+        <button type="button" class="btn sm" data-act="msg-arch" data-id="${esc(m.id)}" data-v="${m.archived ? '0' : '1'}">${ICON.inbox}<span>${m.archived ? 'Вернуть из архива' : 'В архив'}</span></button>
+        <button type="button" class="btn sm ghost danger" data-act="msg-del" data-id="${esc(m.id)}">${ICON.trash}<span>Удалить</span></button></div>
+        <p class="hint">«Ответить» показывает ответ пользователю в приложении. «Ответить по почте» открывает новое письмо в вашей почтовой программе, состояние при этом не меняется.</p>` : ''}
+    </section>`;
+}
+async function msgSend(id, btn){
+  const t = $('#msg-reply'), text = (t ? t.value : '').trim();
+  if(!text){ toast('Напишите текст ответа.'); return; }
+  if(msgLen(text) > MSG_MAX){ toast(`Текст длиннее ${MSG_MAX} знаков.`); return; }
+  btn.disabled = true;
+  try {
+    const res = await pb.send(`/api/molitva/messages/${id}/reply`, {method: 'POST', body: {text}});
+    UI.msgDraft[id] = '';
+    upsert('mreplies', res.reply); upsert('msgs', res.message);
+    if(!isAdmin()) UI.msgSeen[id] = res.message.answers;
+    if(document.activeElement === t) t.blur();
+    render(true); toast(isAdmin() ? 'Ответ отправлен пользователю' : 'Ответ отправлен');
+  } catch(e){ toast(errText(e)); }
+  finally { if(btn.isConnected) btn.disabled = false; }
+}
+async function msgState(id, body, done){
+  try { upsert('msgs', await pb.send(`/api/molitva/messages/${id}/state`, {method: 'POST', body})); render(true); toast(done); }
+  catch(e){ toast(errText(e)); }
+}
+function msgDelete(id){
+  const m = msgById(id); if(!m) return;
+  openForm({title: 'Удалить сообщение?', text: `Сообщение${m.shot ? ', снимок экрана' : ''} и все ответы в переписке удалятся навсегда, в том числе у пользователя.`, submit: 'Удалить', danger: true,
+    async onSave(){
+      await pb.send(`/api/molitva/messages/${id}`, {method: 'DELETE'});
+      S.mreplies = S.mreplies.filter(x => x.message !== id); removeLocal('msgs', id);
+      toast('Сообщение удалено'); go(m.archived ? '#/msgs?box=archive' : '#/msgs', true);
+    }});
+}
+// «Или напишите здесь» и «Скопировать почту»: в полоске срока, в профиле и на вкладке «Материалы» (вне #main тоже)
+document.addEventListener('click', async e => {
+  const w = e.target.closest('[data-msgw]');
+  if(w){ e.preventDefault(); msgWrite(w.dataset.msgw); return; }
+  const c = e.target.closest('[data-cpmail]');
+  if(c){ e.preventDefault(); copyText(c.dataset.cpmail, 'Почта скопирована'); }
+});
+document.addEventListener('input', e => {
+  if(e.target.id !== 'msg-reply') return;
+  const box = e.target.closest('#msg-reply-box'); if(box) UI.msgDraft[box.dataset.id] = e.target.value;
+  const c = $('#msg-cnt'); if(c){ c.textContent = msgCount(e.target.value); c.classList.toggle('over', msgLen(e.target.value) > MSG_MAX); }
+});
+
 /* ---------- Профиль ---------- */
 function vProfile(){
   const u = me();
@@ -1380,7 +1638,11 @@ function vProfile(){
     <nav class="links" aria-label="Мои записи">
       <a href="#/verses">${ICON.book}Мои стихи<span class="n">${S.verses.length} из ${MAX_VERSES}</span>${ICON.chev}</a>
       <a href="#/answers">${ICON.check}Ответы на молитвы<span class="n">${answered}</span>${ICON.chev}</a>
+      ${isAdmin() ? `<a href="#/msgs" id="msgs-link"${msgNew() ? ' aria-label="Сообщения пользователей, есть новые"' : ''}>${ICON.mail}Сообщения пользователей<span class="n${msgNew() ? ' hot' : ''}">${msgNew()}</span>${ICON.chev}</a>` : ''}
     </nav>
+    ${isAdmin() ? '' : `<section class="card msg-card"><p>Вопрос, предложение, отзыв или что-то не работает: напишите, ответ придёт сюда, в «Мои сообщения».</p>
+      <button type="button" class="btn primary" data-act="msg-write">${ICON.mail}<span>Написать администратору</span></button>
+      <a href="#/msgs" id="msgs-link" class="msg-mine"${msgNew() ? ' aria-label="Мои сообщения, есть новый ответ"' : ''}>${ICON.chat}<span>Мои сообщения</span>${msgNew() ? '<span class="ldot" aria-hidden="true"></span>' : ''}<span class="n">${S.msgs.length}</span>${ICON.chev}</a></section>`}
     <section class="card"><h2>Оформление</h2>
       <div class="seg3" role="radiogroup" aria-label="Тема">${[['light','Светлая'],['dark','Тёмная'],['auto','Как в системе']].map(([k, l]) =>
         `<input type="radio" name="p-theme" id="p-theme-${k}" value="${k}"${themePref() === k ? ' checked' : ''}><label for="p-theme-${k}">${l}</label>`).join('')}</div></section>
@@ -1403,7 +1665,7 @@ function vProfile(){
     ${usage}
     <button type="button" class="btn wide" data-act="logout">Выйти</button>
     <details class="fold"><summary><span>Удаление аккаунта</span>${ICON.chev}</summary><div class="fold-body">
-      <p class="hint">Вместе с аккаунтом удалятся все разделы, нужды, записи молитв, стихи и фото. Вернуть их будет нельзя. Ваши нужды пропадут из групп; группы, где вы создатель, перейдут к другому участнику.</p>
+      <p class="hint">Вместе с аккаунтом удалятся все разделы, нужды, записи молитв, стихи, фото и сообщения администратору. Вернуть их будет нельзя. Ваши нужды пропадут из групп; группы, где вы создатель, перейдут к другому участнику.</p>
       <button type="button" class="btn danger" data-act="delete-account">Удалить аккаунт и все данные</button></div></details>
     <p class="hint"><a href="/privacy.html" target="_blank" rel="noopener">Политика конфиденциальности</a></p>`;
 }
@@ -1428,7 +1690,7 @@ function accLogText(a){
 async function loadAdminUsers(){
   if(!isAdmin()) return;
   try { S.adminUsers = await pb.send('/api/molitva/admin/users', {}); } catch(e){ return; }
-  if(route().name === 'profile') schedule();
+  schedule();
 }
 // Фото пользователя: у других людей фото профиля защищено, администратору его отдаёт отдельный маршрут
 function userPhoto(x){
@@ -1468,7 +1730,8 @@ function usersSection(){
       const log = x.log.map(l => `<li><span class="d">${fmtDay(String(l.created).slice(0, 10))}</span> ${esc(accLogText(l.action))}${l.until_before !== l.until_after ? `: ${untilText(l.until_before)} → ${untilText(l.until_after)}` : ''}${l.note ? ` · ${esc(l.note)}` : ''}${l.by ? ` <span class="muted">(${esc(l.by)})</span>` : ''}</li>`).join('');
       return `<div class="usr">
         <div class="usr-head">${userFace(x)}
-          <div class="usr-main"><b>${esc(x.name || x.email)}</b><span class="muted">${x.name ? esc(x.email) + ' · ' : ''}с ${fmtDay(String(x.created).slice(0, 10))} · ${x.photos_size ? 'фото ' + fsize(x.photos_size) : 'фото нет'}</span><span>${userState(x, t)}</span></div></div>
+          <div class="usr-main"><b>${esc(x.name || x.email)}</b><span class="muted">${x.name ? esc(x.email) + ' · ' : ''}с ${fmtDay(String(x.created).slice(0, 10))} · ${x.photos_size ? 'фото ' + fsize(x.photos_size) : 'фото нет'}</span><span>${userState(x, t)}</span>
+            ${adm ? '' : `<a class="usr-msgs" href="#/msgs?user=${id}">${ICON.chat}Сообщения: ${S.msgs.filter(m => m.author === x.id).length}</a>`}</div></div>
         ${adm ? '' : `<div class="usr-acts"><button type="button" class="btn sm" data-act="acc" data-action="extend" data-months="1" data-id="${id}">+1 месяц</button><button type="button" class="btn sm" data-act="acc" data-action="extend" data-months="3" data-id="${id}">+3 месяца</button>${x.suspended ? `<button type="button" class="btn sm" data-act="acc" data-action="resume" data-id="${id}">Возобновить</button>` : `<button type="button" class="btn sm ghost danger" data-act="acc" data-action="suspend" data-id="${id}">Приостановить</button>`}</div>`}
         <details class="usr-more"${UI.openUser === x.id ? ' open' : ''} data-user="${id}"><summary>${adm ? 'Заметки' : 'Дата, заметка и история'}</summary>
           ${adm ? '' : `<div class="usr-row"><div class="field"><label for="ud-${id}">Доступ до</label><input type="date" id="ud-${id}" value="${esc(x.access_until || '')}"></div><div class="usr-btns"><button type="button" class="btn sm" data-act="acc" data-action="set" data-id="${id}">Поставить дату</button><button type="button" class="btn sm ghost" data-act="acc" data-action="unlimited" data-id="${id}">Бессрочно</button></div></div>`}
@@ -1838,6 +2101,7 @@ function formPhoto(){
   else if(rec && rec.photo && !(ph && ph.remove)) cropPhoto({...o, rec, field: 'photo', crop: (ph && ph.crop) || rec.photo_crop}).then(done);
   else pickPhoto(file => cropPhoto({...o, file, canRemove: false}).then(done));
 }
+form.addEventListener('input', e => { if(cur && cur.onInput) cur.onInput(e.target); });
 form.addEventListener('keydown', e => {
   if(e.key === 'Enter' && e.target.id === 'inv-email'){ e.preventDefault(); const b = form.querySelector('[data-dlg="mail"]'); b && !b.disabled && b.click(); }
 });
@@ -2244,6 +2508,12 @@ document.addEventListener('click', async e => {
       break;
     }
     case 'edit-name': openName(); break;
+    case 'msg-write': msgWrite(''); break;
+    case 'msg-send': msgSend(d.id, a); break;
+    case 'msg-st': msgState(d.id, {status: d.st}, 'Отмечено: прочитано'); break;
+    case 'msg-arch': msgState(d.id, {archived: d.v === '1'}, d.v === '1' ? 'В архиве' : 'Возвращено во «Входящие»'); break;
+    case 'msg-del': msgDelete(d.id); break;
+    case 'msg-shot': shotOpen(d.id); break;
     default: accountAction(a, d);
   }
 });
@@ -2573,7 +2843,7 @@ async function accountAction(a, d){
 }
 
 let tt = 0;
-function toast(msg){ const el = $('#toast'); const host = [cropDlg, viewer, calDlg, dlg].find(x => x.open) || document.body; if(el.parentNode !== host) host.appendChild(el); el.textContent = msg; el.classList.add('show'); clearTimeout(tt); tt = setTimeout(() => el.classList.remove('show'), 2800); }
+function toast(msg){ const el = $('#toast'); const host = [cropDlg, viewer, calDlg, dlg, $('#shot')].find(x => x && x.open) || document.body; if(el.parentNode !== host) host.appendChild(el); el.textContent = msg; el.classList.add('show'); clearTimeout(tt); tt = setTimeout(() => el.classList.remove('show'), 2800); }
 
 boot();
 })();
