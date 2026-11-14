@@ -447,7 +447,7 @@ routerAdd("POST", "/api/molitva/groups", (e) => {
     const g = new Record(tx.findCollectionByNameOrId("groups"));
     g.set("name", name);
     g.set("owner", e.auth.id);
-    g.set("invite_code", lib.newGroupCode());
+    g.set("invite_code", lib.newGroupCode(tx));
     tx.save(g);
     lib.addMember(tx, g.id, e.auth.id);
     id = g.id;
@@ -455,10 +455,11 @@ routerAdd("POST", "/api/molitva/groups", (e) => {
   return e.json(200, { id });
 }, GROUP_AUTH);
 
-// Группа по коду из ссылки: название, создатель, сколько участников. Код проверяет только сервер.
+// Группа по коду из ссылки или из окна «Вступить по коду»: название, создатель, сколько участников.
+// Код проверяет только сервер. Неудачные попытки считаются (защита от подбора, см. groupByCode в lib.js).
 routerAdd("GET", "/api/molitva/join/{code}", (e) => {
   const lib = require(`${__hooks}/lib.js`);
-  const g = lib.groupByCode($app, e.request.pathValue("code"));
+  const g = lib.groupByCode($app, e.request.pathValue("code"), e);
   let owner = "";
   try { owner = $app.findRecordById("users", g.getString("owner")).getString("name"); } catch (_) {}
   const members = $app.countRecords("group_members", $dbx.hashExp({ group: g.id }));
@@ -471,23 +472,17 @@ routerAdd("GET", "/api/molitva/join/{code}", (e) => {
 routerAdd("POST", "/api/molitva/join/{code}", (e) => {
   require(`${__hooks}/access_lib.js`).guard(e);
   const lib = require(`${__hooks}/lib.js`);
-  const g = lib.groupByCode($app, e.request.pathValue("code"));
-  if (!lib.isMember($app, g.id, e.auth.id)) {
-    if ($app.countRecords("group_members", $dbx.hashExp({ group: g.id })) >= lib.MAX_MEMBERS) {
-      throw new BadRequestError(`В группе уже ${lib.MAX_MEMBERS} участников: это наибольшее число.`);
-    }
-    lib.checkGroupLimit($app, e.auth.id);
-    lib.addMember($app, g.id, e.auth.id);
-  }
+  const g = lib.groupByCode($app, e.request.pathValue("code"), e);
+  $app.runInTransaction((tx) => lib.joinGroup(tx, g, e.auth));
   return e.json(200, { id: g.id });
 }, GROUP_AUTH);
 
-// Новая ссылка: старая сразу перестаёт работать.
+// Новая ссылка и новый код (8 символов): старые сразу перестают работать.
 routerAdd("POST", "/api/molitva/groups/{id}/link", (e) => {
   require(`${__hooks}/access_lib.js`).guard(e);
   const lib = require(`${__hooks}/lib.js`);
   const g = lib.ownGroup($app, e.request.pathValue("id"), e.auth.id);
-  g.set("invite_code", lib.newGroupCode());
+  g.set("invite_code", lib.newGroupCode($app));
   $app.save(g);
   return e.json(200, { invite_code: g.getString("invite_code") });
 }, GROUP_AUTH);

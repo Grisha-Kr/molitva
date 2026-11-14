@@ -118,9 +118,21 @@ function checkSection(e) {
 const MAX_MEMBERS = 20; // участников в группе
 const MAX_GROUPS = 10;  // групп у одного человека
 
-// Код ссылки-приглашения в группу: 24 случайных символа без похожих (0/o, 1/l)
-function newGroupCode() {
-  return $security.randomStringWithAlphabet(24, "abcdefghijkmnpqrstuvwxyz23456789");
+// Код группы для ссылки и для ввода в приложении (правки 2.6): 8 случайных символов без похожих (0/o, 1/l).
+// В приложении показывается заглавными с дефисом: K7MP-4QDX. Старые коды из 24 символов продолжают работать.
+const CODE_ABC = "abcdefghijkmnpqrstuvwxyz23456789";
+function newGroupCode(app) {
+  for (let i = 0; i < 10; i++) {
+    const code = $security.randomStringWithAlphabet(8, CODE_ABC);
+    if (!app || app.countRecords("groups", $dbx.hashExp({ invite_code: code })) === 0) return code;
+  }
+  throw new BadRequestError("Не удалось сделать новый код. Попробуйте ещё раз.");
+}
+// Код в любом виде: «K7MP-4QDX», «k7mp4qdx», с пробелами. Принимаем 8 и 24 символа.
+// Заглавная I похожа на 1 и l, а этих знаков в коде не бывает, поэтому читаем их как i.
+function normCode(code) {
+  const c = String(code || "").replace(/[\s-]+/g, "").toLowerCase().replace(/[1l]/g, "i");
+  return (c.length === 8 || c.length === 24) && /^[a-z0-9]+$/.test(c) ? c : "";
 }
 
 function isMember(app, groupId, userId) {
@@ -141,15 +153,56 @@ function ownGroup(app, groupId, userId) {
   return g;
 }
 
-// Группа по коду из ссылки-приглашения
-function groupByCode(app, code) {
-  code = String(code || "").trim().toLowerCase();
+// Группа по коду из ссылки или из окна «Вступить по коду».
+// Защита от подбора: после 20 неудачных попыток за час (с одного пользователя или с одного адреса в интернете)
+// сервер отвечает «Слишком много попыток», даже если код верный. Удачные попытки не считаются.
+const CODE_TRIES = 20;
+function groupByCode(app, code, e) {
+  if (e) checkTries(e, "code", CODE_TRIES, 3600, true, "Слишком много попыток. Попробуйте через час.");
+  const c = normCode(code);
   let g = null;
-  if (code.length >= 16) {
-    try { g = app.findFirstRecordByData("groups", "invite_code", code); } catch (_) {}
+  if (c) {
+    try { g = app.findFirstRecordByData("groups", "invite_code", c); } catch (_) {}
   }
-  if (!g) throw new NotFoundError("Ссылка не работает: возможно, создатель группы сделал новую. Попросите прислать свежую ссылку.");
+  if (!g) {
+    if (e) addTry(e, "code");
+    throw new NotFoundError("Код или ссылка не подходят. Проверьте код или попросите у создателя группы новый: возможно, он сделал новую ссылку.");
+  }
   return g;
+}
+
+/* ---------- Ограничения частоты, которые считает сервер (rate_log) ---------- */
+const realIP = (e) => { try { return String(e.realIP() || ""); } catch (_) { return ""; } };
+const agoText = (sec) => new Date(Date.now() - sec * 1000).toISOString().replace("T", " ");
+// Сколько раз за последние sec секунд было событие kind у этого пользователя (и с этого адреса, если byIP)
+function checkTries(e, kind, max, sec, byIP, message) {
+  $app.db().newQuery("DELETE FROM rate_log WHERE created < {:t}").bind({ t: agoText(2 * 86400) }).execute();
+  const since = agoText(sec);
+  const byUser = $app.countRecords("rate_log", $dbx.exp("kind = {:k} AND user = {:u} AND created > {:t}", { k: kind, u: e.auth.id, t: since }));
+  const ip = realIP(e);
+  const byAddr = byIP && ip ? $app.countRecords("rate_log", $dbx.exp("kind = {:k} AND ip = {:ip} AND created > {:t}", { k: kind, ip, t: since })) : 0;
+  if (byUser >= max || byAddr >= max) throw new TooManyRequestsError(message);
+}
+function addTry(e, kind) {
+  const r = new Record($app.findCollectionByNameOrId("rate_log"));
+  r.set("kind", kind);
+  r.set("user", e.auth.id);
+  r.set("ip", realIP(e).slice(0, 64));
+  $app.save(r);
+}
+
+// Вступить в группу любым способом (код, ссылка, приглашение по почте): те же проверки,
+// после вступления приглашения этого человека в эту группу больше не нужны.
+function joinGroup(app, g, user) {
+  if (!isMember(app, g.id, user.id)) {
+    if (app.countRecords("group_members", $dbx.hashExp({ group: g.id })) >= MAX_MEMBERS) {
+      throw new BadRequestError(`В группе уже ${MAX_MEMBERS} участников: это наибольшее число.`);
+    }
+    checkGroupLimit(app, user.id);
+    addMember(app, g.id, user.id);
+  }
+  const email = String(user.getString("email") || "").toLowerCase();
+  for (const r of app.findAllRecords("group_invites", $dbx.hashExp({ group: g.id, email }))) app.delete(r);
 }
 
 function checkGroupLimit(app, userId) {
@@ -473,9 +526,9 @@ function deleteMedia(name) {
 
 module.exports = {
   MB, quotaBytes, usedBytes, checkQuota, checkSectionDepth, checkSection, recordPhoto, checkDayDate, addDefaultVerse,
-  MAX_MEMBERS, MAX_GROUPS, newGroupCode, groupByCode, isMember, memberGroup, ownGroup, checkGroupLimit, addMember, removeMember, handOverGroups, checkQuery,
+  MAX_MEMBERS, MAX_GROUPS, newGroupCode, normCode, groupByCode, checkTries, addTry, joinGroup, realIP, isMember, memberGroup, ownGroup, checkGroupLimit, addMember, removeMember, handOverGroups, checkQuery,
   checkGroupDate, markGroupDay, unmarkGroupDay,
-  MAIL_PER_DAY, mailAllowed, mailPolish, durationText, alertInfo,
+  MAIL_PER_DAY, mailAllowed, mailPolish, durationText, alertInfo, MAIL_HEAD, MAIL_FOOT, escHtml,
   MAT_KIND_RU, checkMaterial, checkMaterialMark,
   MEDIA, MEDIA_TTL, MEDIA_COOKIE, mediaDir, mediaFs, mediaKey, freeBytes, minFreeBytes, mediaName,
   requireAdmin, cookieValue, setMediaCookie, mediaLink, mediaUser, visibleMaterial, deleteMedia,

@@ -62,7 +62,7 @@ const ICON = {
 
 /* ---------- Состояние ---------- */
 const S = {sections:[], needs:[], prayers:[], verses:[], days:[], daily:[], invites:[], usage:null, loaded:false,
-  groups:[], gmembers:[], glinks:[], gpray:[], gdays:[], people:[], shared:[], materials:[], marks:[], mediaUsage:null, access:null, adminUsers:null};
+  groups:[], gmembers:[], glinks:[], gpray:[], gdays:[], people:[], shared:[], materials:[], marks:[], mediaUsage:null, access:null, adminUsers:null, ginv:[]};
 const loadLS = (k, d) => { try { const v = localStorage.getItem('mol_'+k); return v == null ? d : JSON.parse(v); } catch(e){ return d; } };
 const saveLS = (k, v) => { try { localStorage.setItem('mol_'+k, JSON.stringify(v)); } catch(e){} };
 const UI = {reorder:'', form:null, hops:0, verseDay:undefined, verseAt:0, join:null, archOpen:false, up:0, openUser:'', usersOpen:false, invOpen:false};
@@ -206,6 +206,9 @@ async function boot(){
   // ключ из письма сразу убираем из адресной строки и истории
   if(invite || join || mail) history.replaceState(null, '', location.pathname + location.hash);
   if(mail){ showMailLink(mail, qs.get(mail).trim()); return; }
+  // ссылка в группу открылась в браузере без входа (на iPhone так всегда, даже если приложение стоит на экране «Домой»):
+  // показываем код, чтобы ввести его в приложении. Сервер здесь не спрашиваем, данные группы без входа не выдаём.
+  if(!pb.authStore.isValid && join && !invite && !isStandalone()){ showJoinCode(join.trim()); return; }
   if(!pb.authStore.isValid){ showAuth(invite ? 'register' : 'login', invite); return; }
   try { await pb.collection('users').authRefresh(); }
   catch(e){ if(e && e.status && e.status !== 0){ pb.authStore.clear(); showAuth('login'); return; } }
@@ -220,6 +223,7 @@ async function startApp(){
     S.loaded = true; $('#notice').hidden = true; render(true);
     if(route().name === 'profile') loadProfileExtras();
     touchMaterial();
+    loadInvites();
     const join = loadLS('join', '');
     if(join){ saveLS('join', ''); go('#/join/' + encodeURIComponent(join)); }
     subscribeAll().catch(() => {});
@@ -230,7 +234,7 @@ async function startApp(){
 document.addEventListener('visibilitychange', () => {
   if(document.visibilityState !== 'visible'){ savePos(true); return; } // ушли с экрана: запоминаем место в плеере
   checkUpdate();
-  if(S.loaded && pb.authStore.isValid){ loadAll().catch(() => {}); loadAccess(); }
+  if(S.loaded && pb.authStore.isValid){ loadAll().catch(() => {}); loadAccess(); loadInvites(); }
 });
 window.addEventListener('pagehide', () => savePos(true));
 
@@ -321,6 +325,9 @@ function render(force){
     : ['materials','m'].includes(r.name) ? 'materials'
     : ['groups','g','gn','join'].includes(r.name) || (r.name === 'n' && r.q.get('g')) ? 'groups' : 'diary';
   document.querySelectorAll('.tab').forEach(t => t.setAttribute('aria-current', t.dataset.tab === tab ? 'page' : 'false'));
+  // точка на «Группах», пока есть приглашения без ответа
+  const gt = $('.tab[data-tab="groups"]');
+  if(gt){ gt.classList.toggle('has-dot', S.ginv.length > 0); gt.setAttribute('aria-label', S.ginv.length ? 'Группы, есть приглашения' : 'Группы'); }
   const m = $('#main');
   if(calDlg.open) renderCal();
   if(!S.loaded){ m.innerHTML = '<div class="loading">Загружаю…</div>'; return; }
@@ -630,10 +637,73 @@ function vGroups(){
   }).join('');
   const full = list.length >= MAX_GROUPS, ro = readOnly();
   return `<header class="head"><h1>Группы</h1></header>
+    ${S.ginv.map(invCard).join('')}
     ${list.length ? `<div class="groups">${cards}</div>`
       : ro ? '<section class="card"><p class="empty">Вы пока не состоите ни в одной группе.</p></section>'
-      : '<section class="card"><p class="empty">Группа нужна, чтобы молиться вместе: делиться нуждами и видеть, кто сегодня молился. Чтобы молиться вдвоём, создайте группу и отправьте ссылку близкому человеку.</p></section>'}
-    ${ro ? '' : `<button type="button" class="${list.length ? 'dashed' : 'btn primary big wide'}" data-act="new-group"${full ? ' disabled' : ''}>${full ? `Вы уже в ${MAX_GROUPS} группах` : list.length ? '+ Создать группу' : 'Создать группу'}</button>`}`;
+      : '<section class="card"><p class="empty">Группа нужна, чтобы молиться вместе: делиться нуждами и видеть, кто сегодня молился. Чтобы молиться вдвоём, создайте группу и пригласите близкого человека. Если вам прислали код группы, нажмите «Вступить по коду».</p></section>'}
+    ${ro ? '' : `<button type="button" class="${list.length ? 'dashed' : 'btn primary big wide'}" data-act="new-group"${full ? ' disabled' : ''}>${full ? `Вы уже в ${MAX_GROUPS} группах` : list.length ? '+ Создать группу' : 'Создать группу'}</button>
+      ${full ? '' : `<button type="button" class="btn outline wide" data-act="join-code">Вступить по коду</button>`}`}`;
+}
+
+/* ---------- Приглашения по почте и код группы (правки 2.6) ---------- */
+// На iPhone ссылка открывается в браузере, а не в приложении с экрана «Домой». Поэтому приглашение по почте
+// ждёт человека прямо в «Группах», а код группы можно ввести в приложении (Группы → Вступить по коду).
+const JOIN_NOTE = 'Участники увидят ваше имя, фото профиля, в какие дни вы молились в группе, за какие общие нужды молились сегодня, и нужды, которыми вы сами поделитесь. Записи молитв останутся видны только вам.';
+const isStandalone = () => !!((window.matchMedia && window.matchMedia('(display-mode: standalone)').matches) || navigator.standalone === true);
+// Код из ввода, буфера или целой ссылки ?group=: без пробелов и дефисов, строчными, 8 или 24 знака.
+// Знаков 1 и l в коде не бывает: это заглавная I, читаем как i (так же делает сервер)
+function parseCode(t){
+  t = String(t || '').trim();
+  const m = t.match(/[?&]group=([^&#\s]+)/i);
+  if(m){ try { t = decodeURIComponent(m[1]); } catch(e){ t = m[1]; } }
+  const c = t.replace(/[\s-]+/g, '').toLowerCase().replace(/[1l]/g, 'i');
+  return /^([a-z0-9]{8}|[a-z0-9]{24})$/.test(c) ? c : '';
+}
+// Короткий код показываем заглавными с дефисом посередине (K7MP-4QDX), старый длинный как есть
+const fmtCode = c => c && c.length === 8 ? (c.slice(0, 4) + '-' + c.slice(4)).toUpperCase() : String(c || '');
+const shareText = g => `Приглашаю в группу «${g.name}» в Молитвенном дневнике. Если приложение у вас на экране «Домой», откройте его: Группы → Вступить по коду → ${fmtCode(g.invite_code)}. Или откройте ссылку: ${groupLink(g)}`;
+let invAt = 0;
+async function loadInvites(){
+  if(!pb.authStore.isValid) return;
+  invAt = Date.now();
+  try { S.ginv = (await pb.send('/api/molitva/invites', {})).invites || []; } catch(e){ return; }
+  schedule();
+}
+function invCard(i){
+  const ro = readOnly();
+  return `<section class="card inv-card"><p class="inv-t">Вас приглашают в группу «${esc(i.name)}»</p>
+    <p class="muted">Пригласил(а): ${esc(i.by || 'без имени')} · ${i.members} ${plural(i.members, MEMBERS)}</p>
+    ${ro ? '<p class="form-err">Вступить в группу сейчас нельзя: доступ приостановлен.</p>' : ''}
+    <div class="share-btns"><button type="button" class="btn primary" data-act="inv-accept" data-id="${esc(i.id)}"${ro ? ' disabled' : ''}>Вступить</button><button type="button" class="btn" data-act="inv-decline" data-id="${esc(i.id)}">Отказаться</button></div></section>`;
+}
+function acceptInvite(i){
+  openForm({title: `Вступить в группу «${i.name}»?`, text: JOIN_NOTE, submit: 'Вступить',
+    async onSave(){
+      const res = await pb.send(`/api/molitva/invites/${encodeURIComponent(i.id)}/accept`, {method: 'POST'});
+      await loadAll(GKEYS); await loadInvites();
+      toast('Вы вступили в группу'); go('#/g/' + res.id);
+    }});
+}
+// «Вступить по коду»: код в любом виде, «Вставить» берёт его из буфера (в том числе из целой ссылки)
+function openJoinCode(){
+  const canPaste = !!(navigator.clipboard && navigator.clipboard.readText);
+  openForm({title: 'Вступить по коду', text: 'Введите код группы, который прислал её создатель. Например: K7MP-4QDX.',
+    html: `<div class="field"><label for="code-in">Код группы</label><div class="code-row"><input type="text" id="code-in" class="code-input" maxlength="300" placeholder="K7MP-4QDX" autocomplete="off" autocorrect="off" autocapitalize="characters" spellcheck="false" enterkeyhint="go">${canPaste ? '<button type="button" class="btn" data-dlg="paste">Вставить</button>' : ''}</div></div>`,
+    submit: 'Дальше',
+    async onClick(b){
+      if(b.dataset.dlg !== 'paste') return;
+      try {
+        const t = await navigator.clipboard.readText(), c = parseCode(t);
+        $('#code-in').value = c ? fmtCode(c) : String(t || '').trim().slice(0, 300);
+        formErr(c ? '' : 'В буфере нет кода группы. Скопируйте код или ссылку ещё раз.');
+      } catch(e){ b.hidden = true; formErr('Не удалось взять текст из буфера. Введите код вручную.'); }
+    },
+    async onSave(){
+      const c = parseCode($('#code-in').value);
+      if(!c) throw new Error('Код группы состоит из 8 знаков, например K7MP-4QDX. Проверьте, что он введён полностью.');
+      UI.join = null; go('#/join/' + c);
+    }});
+  if(!window.matchMedia('(min-width: 700px)').matches) setTimeout(() => { const i = $('#code-in'); i && i.focus(); }, 50);
 }
 
 // Кнопка «Помолился» у общей нужды (как на главной) и счётчик «Сегодня молились»
@@ -712,20 +782,20 @@ function vGroupNeed(r){
     <p class="hint">Записи молитв этой нужды видит только ${esc(owner)}.</p>`;
 }
 
-// Приглашение по ссылке ?group=КОД: название группы и создатель, кнопка «Вступить»
+// Вступление по коду или ссылке ?group=КОД: название группы и создатель, кнопка «Вступить»
 function vJoin(r){
   const code = r.id;
   if(!UI.join || UI.join.code !== code){ UI.join = {code, data: null, err: ''}; loadJoin(code); }
   const j = UI.join, head = '<header class="head"><h1>Приглашение в группу</h1></header>';
   if(j.err) return head + `<section class="card"><p>${esc(j.err)}</p><a class="btn" href="#/groups">К группам</a></section>`;
-  if(!j.data) return head + '<div class="loading">Проверяю ссылку…</div>';
+  if(!j.data) return head + '<div class="loading">Проверяю код…</div>';
   const d = j.data;
   const top = `<span class="join-ic" aria-hidden="true">${ICON.group}</span><h2>${esc(d.name)}</h2>
     <p class="muted">Создатель: ${esc(d.owner || 'без имени')} · ${d.members} ${plural(d.members, MEMBERS)}</p>`;
   if(d.member) return head + `<section class="card join-card">${top}<p>Вы уже участник этой группы.</p><a class="btn primary big wide" href="#/g/${esc(d.id)}">Открыть группу</a></section>`;
   if(d.full) return head + `<section class="card join-card">${top}<p>В группе уже ${MAX_MEMBERS} участников, больше вступить нельзя.</p><a class="btn wide" href="#/groups">К группам</a></section>`;
   return head + `<section class="card join-card">${top}
-    <p class="hint">Участники увидят ваше имя, фото профиля, в какие дни вы молились в группе, за какие общие нужды молились сегодня, и нужды, которыми вы сами поделитесь. Записи молитв останутся видны только вам.</p>
+    <p class="hint">${JOIN_NOTE}</p>
     ${readOnly() ? `<p class="form-err">Вступить в группу сейчас нельзя. ${accessLine()}</p>` : `<button type="button" class="btn primary big wide" data-act="join" data-code="${esc(code)}">Вступить</button>`}
     <a class="btn ghost wide" href="#/groups">Не сейчас</a></section>`;
 }
@@ -819,17 +889,57 @@ function openNewGroup(){
       go('#/g/' + res.id); toast('Группа создана');
     }});
 }
+// «Пригласить»: по почте (приглашение ждёт в приложении), список «Ждут ответа», код и ссылка
+const INV_OK = 'Приглашение отправлено. Если у человека есть аккаунт, он увидит его в разделе «Группы». Если аккаунта нет, приглашение будет ждать его после регистрации (30 дней).';
 function openInvite(g){
-  const link = groupLink(g);
+  const link = groupLink(g), code = fmtCode(g.invite_code);
   openForm({title: 'Пригласить в группу',
-    text: 'Отправьте ссылку тем, с кем хотите молиться вместе. Вступить смогут те, у кого уже есть аккаунт в приложении: регистрация по-прежнему только по приглашению администратора.',
-    html: `<div class="field"><label for="g-link">Ссылка на группу «${esc(g.name)}»</label><input type="text" id="g-link" readonly value="${esc(link)}"></div>
-      <div class="share-btns"><button type="button" class="btn primary" data-dlg="copy">Скопировать</button>${navigator.share ? '<button type="button" class="btn" data-dlg="share">Поделиться</button>' : ''}</div>`,
+    html: `<section class="inv-block"><h3>Пригласить по почте</h3>
+        <p class="hint">Удобнее всего: приглашение появится у человека прямо в приложении, в разделе «Группы». Вступить смогут те, у кого уже есть аккаунт: регистрация только по приглашению администратора.</p>
+        <div class="field"><label for="inv-email">Почта</label><div class="code-row"><input type="email" id="inv-email" maxlength="254" autocomplete="off" autocapitalize="off" spellcheck="false" enterkeyhint="send"><button type="button" class="btn primary" data-dlg="mail">Пригласить</button></div></div>
+        <p class="form-ok" id="inv-msg" role="status" hidden></p>
+        <div id="inv-pending"></div></section>
+      <section class="inv-block"><h3>По коду или ссылке</h3>
+        <p class="hint">Код вводят в приложении: Группы → Вступить по коду.</p>
+        <div class="big-code${code.length > 9 ? ' long' : ''}">${esc(code)}</div>
+        <button type="button" class="btn" data-dlg="copy-code">Скопировать код</button>
+        <div class="field"><label for="g-link">Ссылка</label><input type="text" id="g-link" readonly value="${esc(link)}"></div>
+        <div class="share-btns"><button type="button" class="btn" data-dlg="copy">Скопировать ссылку</button>${navigator.share ? '<button type="button" class="btn" data-dlg="share">Поделиться</button>' : ''}</div></section>`,
     submit: 'Готово', noCancel: true, async onSave(){},
-    onClick(b){
-      if(b.dataset.dlg === 'copy') copyText(link);
-      if(b.dataset.dlg === 'share') navigator.share({title: 'Молитвенный дневник', text: `Приглашаю в группу «${g.name}» в Молитвенном дневнике`, url: link}).catch(() => {});
+    async onClick(b){
+      const k = b.dataset.dlg;
+      if(k === 'copy-code') copyText(code, 'Код скопирован');
+      if(k === 'copy') copyText(link);
+      if(k === 'share') navigator.share({title: 'Молитвенный дневник', text: shareText(g)}).catch(() => {});
+      if(k === 'mail'){
+        const inp = $('#inv-email'), email = inp.value.trim();
+        $('#inv-msg').hidden = true;
+        if(!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)){ formErr('Проверьте адрес почты.'); return; }
+        b.disabled = true; formErr('');
+        try {
+          await pb.send(`/api/molitva/groups/${g.id}/invite`, {method: 'POST', body: {email}});
+          inp.value = ''; $('#inv-msg').textContent = INV_OK; $('#inv-msg').hidden = false;
+          loadPending(g);
+        } catch(e){ formErr(errText(e)); }
+        finally { b.disabled = false; }
+      }
+      if(k === 'cancel-inv'){
+        if(!arm(b, 'Точно отменить?')) return;
+        b.disabled = true;
+        try { await pb.send(`/api/molitva/groups/${g.id}/invites/${encodeURIComponent(b.dataset.id)}`, {method: 'DELETE'}); toast('Приглашение отменено'); loadPending(g); }
+        catch(e){ formErr(errText(e)); b.disabled = false; }
+      }
     }});
+  loadPending(g);
+}
+// «Ждут ответа»: только почта, которую вы сами ввели
+async function loadPending(g){
+  let list = [];
+  try { list = (await pb.send(`/api/molitva/groups/${g.id}/invites`, {})).invites || []; } catch(e){ return; }
+  const box = $('#inv-pending');
+  if(!box) return;
+  box.innerHTML = list.length ? `<h4 class="flabel">Ждут ответа</h4><div class="inv-list">${list.map(i => `<div class="inv-p"><div><b>${esc(i.email)}</b><small>${fmtDay(createdISO({created: i.date}))}</small></div>
+    <button type="button" class="btn sm ghost danger" data-dlg="cancel-inv" data-id="${esc(i.id)}">Отменить</button></div>`).join('')}</div>` : '';
 }
 function openMembers(g){
   // без доступа создатель может только передать роль, чтобы потом выйти из группы
@@ -897,6 +1007,7 @@ function groupMenu(btn, g){
 // Открыли группы: освежаем отметки молитвы не чаще раза в минуту (живые обновления могли прерваться, мог смениться день)
 let gprayAt = 0;
 window.addEventListener('hashchange', () => {
+  if(route().name === 'groups' && S.loaded && Date.now() - invAt > 5e3) loadInvites();
   if(!['groups','g','gn'].includes(route().name) || !S.loaded || Date.now() - gprayAt < 60e3) return;
   gprayAt = Date.now(); loadAll(['gpray','gdays']).catch(() => {});
 });
@@ -1727,6 +1838,9 @@ function formPhoto(){
   else if(rec && rec.photo && !(ph && ph.remove)) cropPhoto({...o, rec, field: 'photo', crop: (ph && ph.crop) || rec.photo_crop}).then(done);
   else pickPhoto(file => cropPhoto({...o, file, canRemove: false}).then(done));
 }
+form.addEventListener('keydown', e => {
+  if(e.key === 'Enter' && e.target.id === 'inv-email'){ e.preventDefault(); const b = form.querySelector('[data-dlg="mail"]'); b && !b.disabled && b.click(); }
+});
 dlg.addEventListener('close', () => { const c = cur; cur = null; c && c.onClose && c.onClose(c.saved); });
 // Открыть следующее окно после того, как текущее закроется (событие close приходит не сразу)
 function thenOpen(fn){ if(dlg.open) dlg.addEventListener('close', () => setTimeout(fn, 0), {once: true}); else fn(); }
@@ -2083,6 +2197,15 @@ document.addEventListener('click', async e => {
     case 'g-menu': { const g = byId('groups', d.id); if(g) groupMenu(a, g); break; }
     case 'g-invite': { const g = byId('groups', d.id); if(g) openInvite(g); break; }
     case 'g-add-need': { const g = byId('groups', d.id); if(g) openAddToGroup(g); break; }
+    case 'join-code': openJoinCode(); break;
+    case 'inv-accept': { const i = S.ginv.find(x => x.id === d.id); if(i) acceptInvite(i); break; }
+    case 'inv-decline': {
+      if(!arm(a, 'Точно отказаться?')) return;
+      a.disabled = true;
+      try { await pb.send(`/api/molitva/invites/${encodeURIComponent(d.id)}/decline`, {method: 'POST'}); S.ginv = S.ginv.filter(x => x.id !== d.id); render(); toast('Приглашение отклонено'); }
+      catch(err){ toast(errText(err)); a.disabled = false; }
+      break;
+    }
     case 'g-pray': togglePraying(d.id, a); break;
     case 'g-who': openPraying(d.id); break;
     case 'share-need': { const n = byId('needs', d.id); if(n) openShare(n); break; }
@@ -2097,7 +2220,7 @@ document.addEventListener('click', async e => {
       a.disabled = true;
       try {
         const res = await pb.send('/api/molitva/join/' + encodeURIComponent(d.code), {method: 'POST'});
-        await loadAll(GKEYS); UI.join = null;
+        await loadAll(GKEYS); UI.join = null; loadInvites();
         toast('Вы вступили в группу'); go('#/g/' + res.id, true);
       } catch(err){ toast(errText(err)); a.disabled = false; }
       break;
@@ -2365,9 +2488,43 @@ async function confirmVerify(expired){
 /* ---------- Профиль: пароль, приглашения, выход ---------- */
 const INV_ABC = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 function inviteCode(){ const a = new Uint8Array(8); crypto.getRandomValues(a); return Array.from(a, x => INV_ABC[x % INV_ABC.length]).join(''); }
-async function copyText(text){
-  try { await navigator.clipboard.writeText(text); toast('Ссылка скопирована'); }
-  catch(e){ window.prompt && window.prompt('Скопируйте:', text); }
+// Скопировать в буфер; во встроенных браузерах мессенджеров clipboard бывает недоступен, тогда через выделение
+async function copyRaw(text){
+  try { await navigator.clipboard.writeText(text); return true; } catch(e){}
+  try {
+    const ta = document.createElement('textarea');
+    ta.value = text; ta.setAttribute('readonly', ''); ta.style.cssText = 'position:fixed;top:0;left:0;opacity:0';
+    (document.querySelector('dialog[open]') || document.body).appendChild(ta); ta.select();
+    const ok = document.execCommand('copy'); ta.remove();
+    return ok;
+  } catch(e){ return false; }
+}
+async function copyText(text, msg){
+  if(await copyRaw(text)) toast(msg || 'Ссылка скопирована');
+  else if(window.prompt) window.prompt('Скопируйте:', text);
+}
+
+/* ---------- Ссылка ?group= в браузере без входа (правки 2.6) ---------- */
+// На iPhone ссылка из мессенджера или почты открывается в Safari или во встроенном браузере, а у приложения
+// с экрана «Домой» своя память и свой вход. Поэтому сначала предлагаем скопировать код и ввести его в приложении.
+function showJoinCode(raw){
+  $('#app').hidden = true; $('#auth').hidden = false;
+  const c = parseCode(raw), code = c ? fmtCode(c) : String(raw).slice(0, 64);
+  $('#auth-sub').textContent = '';
+  $('#auth-body').innerHTML = `<div class="stack jc"><h2 class="auth-title">Приглашение в группу</h2>
+    <p>Если Молитвенный дневник установлен у вас на экране «Домой», скопируйте код и откройте приложение: Группы → Вступить по коду.</p>
+    <div class="big-code${code.length > 9 ? ' long' : ''}" id="jc-code">${esc(code)}</div>
+    <button type="button" class="btn primary big wide" id="jc-copy">Скопировать код</button>
+    <p class="form-ok" id="jc-ok" role="status" hidden></p>
+    <button type="button" class="btn wide" id="jc-login">Войти здесь, в браузере</button>
+    <p class="hint small">Нет аккаунта? Регистрация только по приглашению администратора.</p></div>`;
+  $('#jc-copy').onclick = async () => {
+    const ok = await copyRaw(code), p = $('#jc-ok');
+    p.className = ok ? 'form-ok' : 'form-err';
+    p.textContent = ok ? 'Код скопирован. Теперь откройте приложение с экрана «Домой».' : 'Не получилось скопировать. Нажмите на код и скопируйте его вручную.';
+    p.hidden = false;
+  };
+  $('#jc-login').onclick = () => showAuth('login');
 }
 async function accountAction(a, d){
   try{
