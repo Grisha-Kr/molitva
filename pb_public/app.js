@@ -25,7 +25,7 @@ const KEYS = Object.keys(PBN);
 const GKEYS = ['groups','gmembers','glinks','gpray','gdays','people','shared'];
 const MAX_MEMBERS = 20, MAX_GROUPS = 10;
 // Материалы (правки 2.3): общий для всех список, ведёт его администратор. marks = свои отметки
-const KINDS = {text:{n:'Текст', ic:'doc'}, audio:{n:'Аудио', ic:'head'}, video:{n:'Видео', ic:'film'}, link:{n:'Ссылка', ic:'link'}};
+const KINDS = {text:{n:'Текст', ic:'doc'}, audio:{n:'Аудио', ic:'head'}, video:{n:'Видео', ic:'film'}, link:{n:'Ссылка', ic:'link'}, pdf:{n:'PDF', ic:'pdf'}};
 
 /* ---------- Значки ---------- */
 const ICON = {
@@ -54,6 +54,7 @@ const ICON = {
   head: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 14v-2a8 8 0 0 1 16 0v2"/><rect x="2.5" y="13" width="4.5" height="7" rx="2"/><rect x="17" y="13" width="4.5" height="7" rx="2"/></svg>',
   film: '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="3"/><path d="M10.5 9.3l4.5 2.7-4.5 2.7z"/></svg>',
   link: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10.5 13.5a3.5 3.5 0 0 0 5 0l3-3a3.5 3.5 0 0 0-5-5l-1 1"/><path d="M13.5 10.5a3.5 3.5 0 0 0-5 0l-3 3a3.5 3.5 0 0 0 5 5l1-1"/></svg>',
+  pdf: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 3h7l4 4v11H8z"/><path d="M15 3v4h4"/><path d="M8 7H5v14h11v-3"/></svg>',
   pin: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 4h6l-1 6 3 3H7l3-3z"/><path d="M12 13v7"/></svg>',
   play: '<svg viewBox="0 0 24 24" aria-hidden="true"><path class="fill" d="M8 5.5l11 6.5-11 6.5z"/></svg>',
   pause: '<svg viewBox="0 0 24 24" aria-hidden="true"><path class="fill" d="M7 5h3.5v14H7zM13.5 5H17v14h-3.5z"/></svg>',
@@ -246,11 +247,11 @@ async function startApp(){
   }
 }
 document.addEventListener('visibilitychange', () => {
-  if(document.visibilityState !== 'visible'){ savePos(true); return; } // ушли с экрана: запоминаем место в плеере
+  if(document.visibilityState !== 'visible'){ savePos(true); prSave(); return; } // ушли с экрана: запоминаем место в плеере и страницу PDF
   checkUpdate();
   if(S.loaded && pb.authStore.isValid){ loadAll().catch(() => {}); loadAccess(); loadInvites(); }
 });
-window.addEventListener('pagehide', () => savePos(true));
+window.addEventListener('pagehide', () => { savePos(true); prSave(); });
 
 /* ---------- Проверка новой версии ---------- */
 // Сравниваем ?v= у app.js и app.css в открытой странице и в свежем index.html с сервера
@@ -343,7 +344,7 @@ window.addEventListener('hashchange', () => { UI.hops++; UI.reorder = ''; closeM
 function render(force){
   const r = route();
   const tab = ['profile','verses','answers','msgs','msg'].includes(r.name) ? 'profile'
-    : ['materials','m'].includes(r.name) ? 'materials'
+    : ['materials','m','pdf'].includes(r.name) ? 'materials'
     : ['groups','g','gn','join'].includes(r.name) || (r.name === 'n' && r.q.get('g')) ? 'groups' : 'diary';
   document.querySelectorAll('.tab').forEach(t => t.setAttribute('aria-current', t.dataset.tab === tab ? 'page' : 'false'));
   // точка на «Группах», пока есть приглашения без ответа
@@ -361,13 +362,19 @@ function render(force){
   // экран материала тоже: иначе остановится плеер или прервётся загрузка файла
   if(r.name === 'm' && !force && (UI.up || $('#main [data-player]'))) return;
   if(!isForm) UI.form = null;
+  // PDF читается на весь экран поверх списка материалов (правки 2.7); без файла, без доступа и без интернета
+  // вместо читалки обычный экран материала с объяснением
+  const pm = r.name === 'pdf' ? byId('materials', r.id) : null;
+  const pdfOk = !!(pm && pm.kind === 'pdf' && pm.media && !readOnly() && navigator.onLine);
   const views = {home:vHome, s:vSection, n:vNeed, new:vSectionForm, edit:vSectionForm, verses:vVerses, answers:vAnswers, profile:vProfile,
-    groups:vGroups, g:vGroup, gn:vGroupNeed, join:vJoin, materials:vMaterials, m:vMaterial, msgs:vMsgs, msg:vMsg};
+    groups:vGroups, g:vGroup, gn:vGroupNeed, join:vJoin, materials:vMaterials, m:vMaterial, msgs:vMsgs, msg:vMsg,
+    pdf: pdfOk || !navigator.onLine ? vMaterials : vMaterial};
   // ответ в переписке пишут, пока приходят живые обновления: курсор в поле остаётся на месте
   const ae = document.activeElement, keep = ae && ae.id === 'msg-reply' ? [ae.selectionStart, ae.selectionEnd] : null;
   m.innerHTML = (views[r.name] || vHome)(r);
   if(keep){ const t = $('#msg-reply'); if(t){ t.focus(); try { t.setSelectionRange(keep[0], keep[1]); } catch(e){} } }
   if(r.name === 'm'){ setupPlayer(); if(isAdmin() && !S.mediaUsage) loadMediaUsage(); } else if(PL.id) stopPlayer();
+  if(pdfOk) prOpen(r.id); else if(PR.id) prClose();
 }
 const notFound = () => `<div class="card"><p>Запись не найдена: возможно, её уже удалили.</p><a class="btn" href="#/">На главную</a></div>`;
 const backLink = (href, text) => `<a class="back" href="${href}">${ICON.back}<span>${esc(text)}</span></a>`;
@@ -1048,12 +1055,16 @@ const matSort = (a, b) => (b.sort ?? 0) - (a.sort ?? 0) || String(b.created).loc
 const kindOf = m => KINDS[m && m.kind] || KINDS.text;
 const matIcon = m => ICON[kindOf(m).ic];
 const MINS = ['мин','мин','мин'];
-const matMeta = m => [kindOf(m).n, m.duration ? `${m.duration} ${plural(m.duration, MINS)}` : ''].filter(Boolean).join(' · ');
+const matMeta = m => [kindOf(m).n, m.kind === 'pdf' ? (m.pages ? `${m.pages} стр.` : '') : m.duration ? `${m.duration} ${plural(m.duration, MINS)}` : ''].filter(Boolean).join(' · ');
+// PDF с загруженным файлом открывается сразу на весь экран, остальное на своём экране материала
+const matHref = m => m.kind === 'pdf' && m.media ? '#/pdf/' + m.id : '#/m/' + m.id;
 const isNewMat = m => { const k = markOf(m.id); return !(k && k.opened_at); };
 const safeUrl = u => /^https?:\/\//i.test(String(u || '')) ? String(u) : '';
 // Докуда человек дослушал: доля от длительности (только для аудио и видео)
 function matProgress(m){
   const k = markOf(m.id);
+  // у PDF в position страница, на которой человек остановился
+  if(m.kind === 'pdf') return k && k.position > 1 && m.pages > 1 ? Math.max(0, Math.min(1, k.position / m.pages)) : 0;
   if(!k || !k.position || !m.duration || (m.kind !== 'audio' && m.kind !== 'video')) return 0;
   return Math.max(0, Math.min(1, k.position / (m.duration * 60)));
 }
@@ -1100,12 +1111,13 @@ function cleanHtml(html){
 }
 
 function matCard(m){
-  const src = m.cover ? photoSrc(m, 'cover', '200x200') : '';
+  // у PDF миниатюра обрезана сверху: виден заголовок первой страницы
+  const src = m.cover ? photoSrc(m, 'cover', m.kind === 'pdf' ? '200x200t' : '200x200') : '';
   const pr = matProgress(m);
   const pills = [isNewMat(m) ? '<span class="pill new">Новое</span>' : '', !m.published ? '<span class="pill draft">Черновик</span>' : ''].join('');
   return `<div class="mat-card">
-    <a class="mat-main" href="#/m/${esc(m.id)}">
-      <span class="mat-pic${src ? ' has' : ''}" aria-hidden="true">${src ? imgTag(src) : matIcon(m)}</span>
+    <a class="mat-main" href="${esc(matHref(m))}">
+      <span class="mat-pic${src ? ' has' : ''}${m.kind === 'pdf' ? ' pdf' : ''}" aria-hidden="true">${src ? imgTag(src) : matIcon(m)}</span>
       <span class="txt"><b>${esc(m.title)}</b>
         ${m.summary ? `<span class="desc">${esc(m.summary)}</span>` : ''}
         <span class="when"><span>${esc(matMeta(m))}</span>${pills}</span></span>
@@ -1123,7 +1135,7 @@ function vMaterials(){
   const state = m => { const k = markOf(m.id); return k && k.archived ? 'arch' : k && k.pinned ? 'pin' : 'rest'; };
   const pin = all.filter(m => state(m) === 'pin'), rest = all.filter(m => state(m) === 'rest'), arch = all.filter(m => state(m) === 'arch');
   const admin = isAdmin() ? `<section class="card"><h2>Материалы ведёте вы</h2>
-    <p class="hint">Создать или изменить материал: панель администратора, «Collections» (коллекции) → <code>materials</code>. Файл аудио или видео загружается в приложении, на экране материала. Неопубликованные материалы видите только вы.</p>
+    <p class="hint">Создать или изменить материал: панель администратора, «Collections» (коллекции) → <code>materials</code>. Файл аудио, видео или PDF загружается в приложении, на экране материала. Неопубликованные материалы видите только вы.</p>
     <a class="btn sm" href="/_/#/collections" target="_blank" rel="noopener">Открыть панель</a></section>` : '';
   if(!all.length) return head + '<section class="card"><p class="empty">Материалов пока нет.</p></section>' + admin;
   return head +
@@ -1147,6 +1159,11 @@ function vMaterial(r){
   else if(m.kind === 'link') body = url
     ? `<p class="mat-ext">${ICON.link}Внешний сайт</p><a class="btn primary big wide" href="${esc(url)}" target="_blank" rel="noopener noreferrer">Открыть</a>`
     : '<p class="hint">Адрес ещё не вписан.</p>';
+  else if(m.kind === 'pdf'){
+    const pos = Math.round((markOf(m.id) || {}).position || 0);
+    body = (m.media ? `<a class="btn primary big wide" href="#/pdf/${esc(m.id)}">${ICON.pdf}<span>${pos > 1 ? `Продолжить со страницы ${pos}` : 'Открыть'}</span></a>` : '<p class="hint">Файл ещё не загружен.</p>')
+      + (isAdmin() ? matAdminHTML(m) : '');
+  }
   else body = matMediaHTML(m);
   return `<div class="nav-head">${backLink('#/materials', 'Материалы')}
       ${readOnly() ? '' : `<button type="button" class="icon-btn" data-act="mat-menu" data-id="${esc(m.id)}" aria-label="Действия с материалом" aria-haspopup="menu">${ICON.more}</button>`}</div>
@@ -1293,15 +1310,21 @@ function plSession(m, el){
 }
 
 /* ---------- Загрузка файла материала (только администратор) ---------- */
+const MEDIA_KINDS = {
+  video: {about: 'Видео MP4 (H.264 и AAC), до 1 ГБ.', accept: 'video/mp4,.mp4', ext: ['mp4'], max: 1024 * MB},
+  audio: {about: 'Аудио MP3 или M4A, до 100 МБ.', accept: 'audio/mpeg,audio/mp4,.mp3,.m4a', ext: ['mp3', 'm4a'], max: 100 * MB},
+  pdf: {about: 'PDF, до 100 МБ. Число страниц приложение посчитает само, а если у материала нет своей обложки, сделает её из первой страницы.', accept: 'application/pdf,.pdf', ext: ['pdf'], max: 100 * MB}
+};
 function matAdminHTML(m){
-  const about = m.kind === 'video' ? 'Видео MP4 (H.264 и AAC), до 1 ГБ.' : 'Аудио MP3 или M4A, до 100 МБ.';
-  const accept = m.kind === 'video' ? 'video/mp4,.mp4' : 'audio/mpeg,audio/mp4,.mp3,.m4a';
-  const have = m.media ? `<p class="hint">Загружен файл ${fsize(m.media_size || 1)}${m.duration ? ', ' + m.duration + ' ' + plural(m.duration, MINS) : ''}.</p>` : '';
+  const mk = MEDIA_KINDS[m.kind] || MEDIA_KINDS.audio, about = mk.about, accept = mk.accept;
+  const extra = m.kind === 'pdf' ? (m.pages ? `, ${m.pages} стр.` : ', страницы ещё не посчитаны') : m.duration ? ', ' + m.duration + ' ' + plural(m.duration, MINS) : '';
+  const have = m.media ? `<p class="hint">Загружен файл ${fsize(m.media_size || 1)}${extra}${extra.endsWith('.') ? '' : '.'}</p>` : '';
   return `<section class="card mat-admin"><h2>Файл материала</h2>
     <p class="hint">${about} Файл лежит на сервере отдельно от базы, поэтому в ежедневную копию базы он не попадает. Загружайте с устойчивого интернета: большой файл идёт несколько минут.</p>
     ${have}
     <div class="up-row">
-      <label class="btn sm upload" for="mat-file">${m.media ? 'Заменить файл' : 'Загрузить файл'}<input type="file" id="mat-file" accept="${accept}"></label>
+      <button type="button" class="btn sm" data-act="mat-pick" data-accept="${esc(accept)}">${m.media ? 'Заменить файл' : 'Загрузить файл'}</button>
+      ${m.media && m.kind === 'pdf' ? '<button type="button" class="btn sm ghost" data-act="mat-pdf-info" data-id="' + esc(m.id) + '">Посчитать страницы заново</button>' : ''}
       ${m.media && !m.published ? '<button type="button" class="btn sm ghost danger" data-act="mat-file-del" data-id="' + esc(m.id) + '">Убрать файл</button>' : ''}
     </div>
     <div class="up-bar" id="up-bar" hidden><i></i></div>
@@ -1350,15 +1373,25 @@ async function pickMedia(file){
   const m = byId('materials', route().id);
   if(!m) return;
   const bar = $('#up-bar'), fill = bar && bar.querySelector('i');
+  const isPdf = m.kind === 'pdf', mk = MEDIA_KINDS[m.kind];
+  // расширение и размер проверяем до загрузки, чтобы не ждать отказа сервера несколько минут
+  if(isPdf && mk.ext.indexOf((file.name.split('.').pop() || '').toLowerCase()) < 0){ toast('Выберите файл PDF.'); return; }
+  if(mk && file.size > mk.max){ toast(`Файл больше, чем можно: ${fsize(file.size)}. ${mk.about}`); return; }
   UI.up = 1;
   if(bar){ bar.hidden = false; fill.style.width = '2%'; }
-  toast('Определяю длительность…');
+  if(!isPdf) toast('Определяю длительность…');
   try {
-    const minutes = m.duration ? 0 : await fileMinutes(file);
+    const minutes = isPdf || m.duration ? 0 : await fileMinutes(file);
     toast('Загружаю файл…');
     await uploadMedia(m.id, file, minutes, p => { if(fill) fill.style.width = Math.max(2, Math.round(p * 100)) + '%'; });
     await loadAll(['materials']);
-    toast('Файл загружен');
+    let note = '';
+    if(isPdf){
+      toast('Считаю страницы…');
+      try { await pdfInfo(m.id); await loadAll(['materials']); }
+      catch(e){ note = ' Страницы посчитать не удалось: ' + pdfErr(e); }
+    }
+    toast('Файл загружен.' + note);
   } catch(e){ toast(errText(e)); }
   finally {
     UI.up = 0;
@@ -1371,7 +1404,9 @@ function matMenu(btn, m){
   const k = markOf(m.id) || {};
   openMenu(btn, [
     {label: k.pinned && !k.archived ? 'Открепить' : 'Закрепить', run: () => matMark(m, {pinned: !(k.pinned && !k.archived), archived: false})},
-    {label: k.archived ? 'Вернуть из архива' : 'В архив', run: () => matMark(m, {archived: !k.archived})}
+    {label: k.archived ? 'Вернуть из архива' : 'В архив', run: () => matMark(m, {archived: !k.archived})},
+    // карточка PDF открывает читалку, поэтому экран с файлом администратор открывает отсюда
+    ...(isAdmin() && m.kind === 'pdf' && route().name !== 'm' ? [{label: 'Файл материала', run: () => go('#/m/' + m.id)}] : [])
   ]);
 }
 async function matMark(m, patch){
@@ -1382,7 +1417,7 @@ async function matMark(m, patch){
 let openedMat = '';
 function touchMaterial(){
   const r = route();
-  if(r.name !== 'm' || !S.loaded || openedMat === r.id || readOnly()) return;
+  if((r.name !== 'm' && r.name !== 'pdf') || !S.loaded || openedMat === r.id || readOnly()) return;
   const m = byId('materials', r.id);
   if(!m || !isNewMat(m)) return;
   openedMat = r.id;
@@ -1390,7 +1425,365 @@ function touchMaterial(){
 }
 window.addEventListener('hashchange', touchMaterial);
 // На аудио, видео и обложках контекстное меню (правая кнопка, долгое нажатие) не открывается
-document.addEventListener('contextmenu', e => { if(e.target.closest('.mat-cover, .mat-pic, .mat-media, audio, video')) e.preventDefault(); });
+document.addEventListener('contextmenu', e => { if(e.target.closest('.mat-cover, .mat-pic, .mat-media, audio, video, .pdfr')) e.preventDefault(); });
+
+/* ---------- PDF в «Материалах» (правки 2.7, часть Б) ---------- */
+// PDF читается только внутри приложения, на весь экран: страницы подряд сверху вниз. pdf.js (тот же, что в «Библиотеке»)
+// загружается только при первом открытии PDF. Файл идёт кусками по 512 КБ по ссылке на 2 часа с кукой,
+// на устройстве ничего не сохраняется. Текстового слоя нет: выделить и скопировать текст нельзя.
+const PDF_CHUNK = 512 * 1024, PDF_REQ = 4 * PDF_CHUNK; // один запрос к серверу не больше 2 МБ
+const PDF_ZMAX = 3, PDF_PAD = 8, PDF_WMAX = 900, PDF_PIX = 5e6; // PDF_PIX: наибольшее число точек одной нарисованной страницы
+const PDF_STEPS = [1, 1.25, 1.5, 2, 2.5, 3];
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+let pdfjsLoad = null;
+function loadPdfjs(){
+  if(!pdfjsLoad) pdfjsLoad = import('/vendor/pdfjs/pdf.min.mjs').then(lib => { lib.GlobalWorkerOptions.workerSrc = '/vendor/pdfjs/pdf.worker.min.mjs'; return lib; }).catch(e => { pdfjsLoad = null; throw e; });
+  return pdfjsLoad;
+}
+function pdfErr(e){
+  const n = e && e.name;
+  if(n === 'PasswordException') return 'Этот PDF защищён паролем, приложение его не открывает.';
+  if(n === 'InvalidPDFException' || n === 'MissingPDFException' || n === 'UnexpectedResponseException' || n === 'FormatError') return 'Файл не открывается: похоже, PDF повреждён.';
+  if(!navigator.onLine) return 'Нет подключения к интернету.';
+  return errText(e);
+}
+// Источник PDF: ссылка на файл материала и чтение кусков. Новая ссылка берётся заранее (когда до конца её срока
+// осталось 10 минут) и сразу, если сервер ответил 401. Одновременные куски ждут один общий запрос ссылки.
+function pdfSource(id){
+  const src = {id, link: null, at: 0, p: null, closed: false};
+  src.getLink = force => {
+    const l = src.link, ttl = l ? +l.ttl || 0 : 0;
+    if(!force && l && Date.now() - src.at < Math.max(ttl * 0.5, ttl - 600) * 1000) return Promise.resolve(l);
+    if(!src.p) src.p = pb.send('/api/molitva/materials/' + id + '/media-link', {}).then(x => { src.link = x; src.at = Date.now(); return x; }).finally(() => { src.p = null; });
+    return src.p;
+  };
+  src.fetch = async (begin, end, tries = 0, fresh = false) => {
+    const link = await src.getLink(fresh);
+    let res;
+    try { res = await fetch(link.url, {headers: {Range: `bytes=${begin}-${end - 1}`}, cache: 'no-store', credentials: 'same-origin'}); }
+    catch(e){ if(tries < 3 && !src.closed){ await sleep(1500 * (tries + 1)); return src.fetch(begin, end, tries + 1, fresh); } throw {status: 0}; }
+    if(res.status === 206) return new Uint8Array(await res.arrayBuffer());
+    let j = {}; try { j = await res.json(); } catch(e){}
+    if(res.status === 401 && !fresh) return src.fetch(begin, end, tries, true); // ссылка устарела: просим новую
+    throw {status: res.status, response: j};
+  };
+  return src;
+}
+// Открыть документ: pdf.js просит нужные места файла, мы приносим их кусками (по образцу rdMakeTransport в «Библиотеке»)
+async function pdfOpenDoc(src, onFail){
+  const [lib, link] = await Promise.all([loadPdfjs(), src.getLink(true)]);
+  if(!(link.size > 0)) throw new Error('У этого материала ещё нет файла.');
+  const failed = [];
+  class T extends lib.PDFDataRangeTransport {
+    requestDataRange(begin, end){ for(let b = begin; b < end; b += PDF_REQ) this.pull(b, Math.min(end, b + PDF_REQ)); }
+    pull(b, e){
+      src.fetch(b, e).then(buf => { if(!src.closed) this.onDataRange(b, buf); })
+        .catch(err => { if(src.closed) return; failed.push([b, e]); if(onFail) onFail(err); });
+    }
+  }
+  const transport = new T(link.size, null);
+  const task = lib.getDocument({range: transport, length: link.size, rangeChunkSize: PDF_CHUNK, disableAutoFetch: true, disableStream: true,
+    isEvalSupported: false, enableXfa: false, cMapUrl: '/vendor/pdfjs/cmaps/', cMapPacked: true, standardFontDataUrl: '/vendor/pdfjs/standard_fonts/'});
+  const close = () => { src.closed = true; try { task.destroy().catch(() => {}); } catch(e){} };
+  let doc;
+  try { doc = await task.promise; } catch(e){ close(); throw e; }
+  return {doc, close, retry(){ for(const [b, e] of failed.splice(0)) transport.pull(b, e); }};
+}
+// Нарисовать страницу на новом холсте: scale = сколько точек холста на одну точку страницы PDF
+function pdfDraw(page, scale){
+  const vp = page.getViewport({scale});
+  const cv = document.createElement('canvas');
+  cv.width = Math.max(1, Math.floor(vp.width)); cv.height = Math.max(1, Math.floor(vp.height));
+  const task = page.render({canvasContext: cv.getContext('2d', {alpha: false}), viewport: vp});
+  return {cv, task};
+}
+// После загрузки файла (только администратор): число страниц и, если своей обложки нет, обложка из первой страницы
+async function pdfInfo(id){
+  const src = pdfSource(id);
+  let fail;
+  const broken = new Promise((_, rej) => { fail = rej; });
+  broken.catch(() => {});
+  const h = await Promise.race([pdfOpenDoc(src, fail), broken]);
+  try {
+    const m = byId('materials', id) || {};
+    const fd = new FormData();
+    fd.append('pages', String(h.doc.numPages));
+    if(!m.cover || m.cover_auto){
+      const page = await Promise.race([h.doc.getPage(1), broken]);
+      const {cv, task} = pdfDraw(page, 600 / page.getViewport({scale: 1}).width);
+      await Promise.race([task.promise, broken]);
+      const blob = await new Promise(res => cv.toBlob(res, 'image/jpeg', 0.85));
+      cv.width = cv.height = 0;
+      if(blob) fd.append('cover', new File([blob], 'cover.jpg', {type: 'image/jpeg'}));
+    }
+    await pb.send('/api/molitva/materials/' + id + '/pdf-info', {method: 'POST', body: fd});
+  } finally { h.close(); }
+}
+
+/* ---------- Читалка PDF ---------- */
+// Лента страниц: у каждой страницы заготовка нужного размера, нарисованы только страницы рядом с видимой частью
+// (IntersectionObserver с запасом в один экран сверху и снизу), остальные холсты освобождаются. Пока страница
+// не загружена, её размер считается таким же, как у первой; настоящий ставится при загрузке (prFixAr).
+const prBox = $('#pdfr'), prScroll = $('#pdfr-scroll'), prPages = $('#pdfr-pages');
+const PR = {id: '', pin: null, src: null, h: null, doc: null, n: 0, z: 1, ar: 0.707, bw: 0, cw: 0, els: [], cur: 0, io: null, near: new Set(), busy: false, gen: 0, hold: false, zt: 0, saveT: 0, raf: 0, pinch: null};
+function prLabel(){ $('#pdfr-page').textContent = PR.n ? `Страница ${PR.cur || 1} из ${PR.n}` : 'PDF'; }
+function prMsg(text, retry){
+  const box = $('#pdfr-msg');
+  box.hidden = !text;
+  box.innerHTML = text ? `<div class="pdfr-msg-box"><p>${esc(text)}</p>${retry ? '<button type="button" class="btn primary" data-pr="retry">Повторить</button><button type="button" class="btn" data-pr="close">Закрыть</button>' : ''}</div>` : '';
+}
+function prZoomBtns(){ $('#pdfr-out').disabled = PR.z <= 1.001; $('#pdfr-in').disabled = PR.z >= PDF_ZMAX - 0.001; }
+// Ширина страницы «по ширине экрана» (на компьютере не шире 900 точек), умноженная на увеличение
+function prWidth(){
+  PR.cw = prScroll.clientWidth;
+  PR.bw = Math.max(120, Math.min(PR.cw - 2 * PDF_PAD, PDF_WMAX));
+  prPages.style.setProperty('--pw', (PR.bw * PR.z) + 'px');
+}
+async function prOpen(id){
+  if(PR.id === id) return;
+  prClose();
+  const src = pdfSource(id);
+  Object.assign(PR, {id, src, cur: 0, n: 0, z: 1});
+  document.documentElement.classList.add('pdfr-on');
+  prBox.hidden = false;
+  prLabel(); prZoomBtns(); prMsg('Открываю…');
+  try { prScroll.focus({preventScroll: true}); } catch(e){}
+  try {
+    const h = await pdfOpenDoc(src, err => { if(PR.src === src) prMsg(pdfErr(err), true); });
+    if(PR.src !== src){ h.close(); return; }
+    PR.h = h; PR.doc = h.doc; PR.n = h.doc.numPages;
+    const first = await h.doc.getPage(1);
+    if(PR.src !== src) return;
+    const vp = first.getViewport({scale: 1});
+    PR.ar = vp.width / vp.height;
+    prBuild();
+    // продолжаем со страницы, на которой человек остановился (на любом своём устройстве)
+    prGo(Math.round((markOf(id) || {}).position || 1));
+    prMsg('');
+  } catch(e){ if(PR.src === src) prMsg(pdfErr(e), true); }
+}
+function prBuild(){
+  prPages.textContent = '';
+  prPages.style.setProperty('--ar', PR.ar);
+  const frag = document.createDocumentFragment();
+  PR.els = [];
+  for(let i = 1; i <= PR.n; i++){ const d = document.createElement('div'); d.className = 'pdfr-pg'; d.dataset.p = i; d._gen = -1; frag.appendChild(d); PR.els.push(d); }
+  prPages.appendChild(frag);
+  prWidth();
+  PR.io = new IntersectionObserver(prSeen, {root: prScroll, rootMargin: '100% 0px 100% 0px'});
+  PR.els.forEach(d => PR.io.observe(d));
+}
+function prSeen(entries){
+  for(const en of entries){
+    const i = +en.target.dataset.p;
+    if(en.isIntersecting) PR.near.add(i); else { PR.near.delete(i); prDrop(en.target); }
+  }
+  prPump();
+}
+// Страница ушла далеко: её холст освобождается, остаётся заготовка
+function prDrop(el){
+  if(el._task){ try { el._task.cancel(); } catch(e){} el._task = null; }
+  const cv = el.firstChild;
+  if(cv){ cv.width = cv.height = 0; el.textContent = ''; }
+  el._gen = -1;
+}
+// Рисуем по одной странице, сначала ближайшую к текущей
+function prPump(){
+  if(PR.busy || PR.hold || !PR.doc) return;
+  let best = 0, bd = 1e9;
+  for(const i of PR.near){
+    const el = PR.els[i - 1];
+    if(!el || el._gen === PR.gen || el._bad === PR.gen) continue;
+    const d = Math.abs(i - PR.cur);
+    if(d < bd){ bd = d; best = i; }
+  }
+  if(!best) return;
+  PR.busy = true;
+  const el = PR.els[best - 1], gen = PR.gen;
+  prRender(best, el, gen).catch(() => { el._bad = gen; }).finally(() => { PR.busy = false; prPump(); });
+}
+async function prRender(i, el, gen){
+  const doc = PR.doc;
+  const page = await doc.getPage(i);
+  if(PR.doc !== doc || !PR.near.has(i)) return;
+  const v1 = page.getViewport({scale: 1});
+  prFixAr(el, v1.width / v1.height);
+  // чёткость под экран, но не больше PDF_PIX точек на страницу: иначе при большом увеличении телефону не хватит памяти
+  let scale = PR.bw * PR.z * Math.min(window.devicePixelRatio || 1, 2) / v1.width;
+  const pix = v1.width * v1.height * scale * scale;
+  if(pix > PDF_PIX) scale *= Math.sqrt(PDF_PIX / pix);
+  const {cv, task} = pdfDraw(page, scale);
+  el._task = task;
+  try { await task.promise; }
+  catch(e){ cv.width = cv.height = 0; if(el._task === task) el._task = null; if(e && e.name === 'RenderingCancelledException') return; throw e; }
+  if(el._task === task) el._task = null;
+  try { page.cleanup(); } catch(e){}
+  if(PR.doc !== doc || !PR.near.has(i)){ cv.width = cv.height = 0; return; }
+  const old = el.firstChild;
+  if(old){ old.width = old.height = 0; el.textContent = ''; }
+  el.appendChild(cv);
+  el._gen = gen;
+}
+// Настоящий размер страницы отличается от размера первой: меняем высоту заготовки. Если страница выше видимой части,
+// лента сдвигается на разницу, чтобы текст под пальцем остался на месте.
+function prFixAr(el, ar){
+  if(Math.abs(ar - (el._ar || PR.ar)) < 0.002) return;
+  // место запоминаем до смены высоты: у конца ленты браузер сам поджимает прокрутку, и сдвиг «на разницу» вышел бы двойным
+  const top0 = prScroll.scrollTop, above = el.offsetTop + el.offsetHeight <= top0, h0 = el.offsetHeight;
+  el._ar = ar;
+  el.style.setProperty('--ar', ar);
+  if(above){ prScroll.scrollTop = top0 + el.offsetHeight - h0; prRepin(); }
+}
+// Номер страницы, в которую попадает строка y (от начала ленты)
+function prAt(y){
+  const els = PR.els;
+  let lo = 0, hi = els.length - 1;
+  while(lo < hi){ const mid = (lo + hi + 1) >> 1; if(els[mid].offsetTop <= y) lo = mid; else hi = mid - 1; }
+  return lo + 1;
+}
+// Текущая страница: та, что пересекает линию на трети экрана сверху; в конце ленты последняя.
+// После перехода к странице (по номеру, при открытии) номер держится, пока человек сам не сдвинет ленту:
+// иначе у низкой альбомной страницы номер сразу показал бы следующую.
+function prTrack(){
+  // лента не видна (печать, свёрнутое окно): высоты нулевые, считать нечего
+  if(!PR.els.length || !prScroll.clientHeight) return;
+  const top = prScroll.scrollTop;
+  let p;
+  if(PR.pin && Math.abs(top - PR.pin.top) < 4) p = PR.pin.n;
+  else {
+    PR.pin = null;
+    const atEnd = top + prScroll.clientHeight >= prScroll.scrollHeight - 2;
+    p = atEnd && top > 0 ? PR.n : prAt(top + prScroll.clientHeight / 3);
+  }
+  if(p === PR.cur) return;
+  PR.cur = p;
+  prLabel();
+  clearTimeout(PR.saveT);
+  PR.saveT = setTimeout(prSave, 1500);
+  prPump();
+}
+prScroll.addEventListener('scroll', () => { if(PR.raf) return; PR.raf = requestAnimationFrame(() => { PR.raf = 0; prTrack(); }); }, {passive: true});
+function prGo(n){
+  n = Math.max(1, Math.min(PR.n, Math.round(+n) || 1));
+  const el = PR.els[n - 1];
+  if(!el) return;
+  prScroll.scrollTop = n === 1 ? 0 : el.offsetTop - PDF_PAD;
+  PR.pin = {n, top: prScroll.scrollTop};
+  prTrack();
+}
+// Ленту сдвинула сама читалка (а не человек): номер страницы, к которой перешли, остаётся
+const prRepin = () => { if(PR.pin) PR.pin.top = prScroll.scrollTop; };
+// Страница, на которой остановились, хранится в отметке материала (как секунды у аудио)
+function prSave(){
+  clearTimeout(PR.saveT);
+  const id = PR.id, p = PR.cur;
+  if(!id || !p || !PR.n || readOnly()) return;
+  const was = Math.round((markOf(id) || {}).position || 0);
+  if(was === p || (was === 0 && p === 1)) return;
+  setMark(id, {position: p}).catch(() => {});
+}
+// Увеличение от «по ширине» до 3×. Точка (cx, cy) экрана остаётся на месте: под пальцами или под курсором.
+function prZoom(z, cx, cy){
+  z = Math.max(1, Math.min(PDF_ZMAX, z));
+  if(!PR.els.length || Math.abs(z - PR.z) < 0.001) return;
+  if(cx == null){ cx = prScroll.clientWidth / 2; cy = prScroll.clientHeight / 2; }
+  const X = prScroll.scrollLeft + cx, Y = prScroll.scrollTop + cy;
+  const el = PR.els[prAt(Y) - 1];
+  const fx = (X - el.offsetLeft) / el.offsetWidth, fy = (Y - el.offsetTop) / el.offsetHeight;
+  PR.z = z;
+  prWidth();
+  prScroll.scrollLeft = el.offsetLeft + fx * el.offsetWidth - cx;
+  // кнопками увеличиваем от верхнего края экрана; если перешли к странице, она остаётся вверху
+  prScroll.scrollTop = PR.pin && cy === 0 ? PR.els[PR.pin.n - 1].offsetTop - PDF_PAD : el.offsetTop + fy * el.offsetHeight - cy;
+  prRepin();
+  prZoomBtns();
+  prRedraw();
+}
+// После смены размера страницы перерисовываются заново, когда жест закончился (до этого холст просто растянут)
+function prRedraw(){
+  PR.gen++; PR.hold = true;
+  clearTimeout(PR.zt);
+  PR.zt = setTimeout(() => { PR.hold = false; prPump(); }, 220);
+}
+function prStep(dir){
+  const z = PR.z;
+  const next = dir > 0 ? PDF_STEPS.find(s => s > z + 0.01) : [...PDF_STEPS].reverse().find(s => s < z - 0.01);
+  if(next) prZoom(next, prScroll.clientWidth / 2, 0);
+}
+// Щипок двумя пальцами
+const prDist = t => Math.hypot(t[0].clientX - t[1].clientX, t[0].clientY - t[1].clientY);
+prScroll.addEventListener('touchstart', e => { if(e.touches.length === 2){ PR.pinch = {d: prDist(e.touches) || 1, z: PR.z}; e.preventDefault(); } }, {passive: false});
+prScroll.addEventListener('touchmove', e => {
+  if(!PR.pinch || e.touches.length !== 2) return;
+  e.preventDefault();
+  const r = prScroll.getBoundingClientRect(), t = e.touches;
+  prZoom(PR.pinch.z * prDist(t) / PR.pinch.d, (t[0].clientX + t[1].clientX) / 2 - r.left, (t[0].clientY + t[1].clientY) / 2 - r.top);
+}, {passive: false});
+const prPinchEnd = e => { if(e.touches.length < 2) PR.pinch = null; };
+prScroll.addEventListener('touchend', prPinchEnd);
+prScroll.addEventListener('touchcancel', prPinchEnd);
+// Safari: свой жест увеличения всей страницы в читалке не нужен
+for(const ev of ['gesturestart', 'gesturechange']) prBox.addEventListener(ev, e => e.preventDefault());
+// Компьютер: Ctrl + колесо (и щипок на трекпаде)
+prScroll.addEventListener('wheel', e => {
+  if(!(e.ctrlKey || e.metaKey)) return;
+  e.preventDefault();
+  const r = prScroll.getBoundingClientRect();
+  prZoom(PR.z * Math.exp(-e.deltaY * 0.01), e.clientX - r.left, e.clientY - r.top);
+}, {passive: false});
+window.addEventListener('resize', () => {
+  if(!PR.id || !PR.els.length || prScroll.clientWidth === PR.cw) return;
+  // телефон повернули или окно изменили: остаёмся на той же странице и на том же месте в ней
+  const el = PR.els[(PR.cur || 1) - 1], f = el.offsetHeight ? (prScroll.scrollTop - el.offsetTop) / el.offsetHeight : 0;
+  prWidth();
+  prScroll.scrollTop = el.offsetTop + f * el.offsetHeight;
+  prRepin();
+  prRedraw();
+});
+function prClose(){
+  if(!PR.id) return;
+  prSave();
+  if(PR.io) PR.io.disconnect();
+  for(const el of PR.els) prDrop(el);
+  if(PR.src) PR.src.closed = true;
+  if(PR.h) PR.h.close();
+  clearTimeout(PR.zt); clearTimeout(PR.saveT);
+  prPages.textContent = '';
+  Object.assign(PR, {id: '', pin: null, src: null, h: null, doc: null, n: 0, z: 1, els: [], cur: 0, io: null, near: new Set(), busy: false, gen: 0, hold: false, pinch: null});
+  prBox.hidden = true;
+  document.documentElement.classList.remove('pdfr-on');
+  prMsg('');
+}
+const prExit = () => goBack('#/materials');
+function prAskPage(){
+  if(!PR.n) return;
+  openForm({title: 'Перейти к странице', submit: 'Перейти',
+    html: `<div class="field"><label for="pg-num">Номер страницы от 1 до ${PR.n}</label><input type="text" inputmode="numeric" pattern="[0-9]*" id="pg-num" value="${PR.cur || 1}" maxlength="6" autocomplete="off"></div>`,
+    async onSave(){
+      const n = parseInt(($('#pg-num').value || '').trim(), 10);
+      if(!(n >= 1 && n <= PR.n)) throw new Error(`Введите число от 1 до ${PR.n}.`);
+      prGo(n);
+    }});
+  const i = $('#pg-num'); i.focus(); i.select();
+}
+prBox.addEventListener('click', e => {
+  const b = e.target.closest('button');
+  if(!b) return;
+  if(b.id === 'pdfr-close' || b.dataset.pr === 'close') prExit();
+  else if(b.id === 'pdfr-page') prAskPage();
+  else if(b.id === 'pdfr-in') prStep(1);
+  else if(b.id === 'pdfr-out') prStep(-1);
+  else if(b.dataset.pr === 'retry'){
+    // куски не дошли: просим их ещё раз; документ не открылся совсем: открываем заново
+    if(PR.h){ prMsg(''); PR.h.retry(); } else { const id = PR.id; prClose(); prOpen(id); }
+  }
+});
+// Пока открыт PDF: печать и «Сохранить как» с клавиатуры не работают, Esc закрывает читалку
+document.addEventListener('keydown', e => {
+  if(!PR.id) return;
+  if((e.ctrlKey || e.metaKey) && (e.code === 'KeyP' || e.code === 'KeyS')){ e.preventDefault(); e.stopPropagation(); return; }
+  if(e.key === 'Escape' && !menu && !document.querySelector('dialog[open]')) prExit();
+}, true);
 
 /* ---------- Сообщения администратору (правки 2.7, часть А, по образцу «Библиотеки») ---------- */
 // Пользователь пишет из профиля («Написать администратору») или из полоски срока («или напишите здесь»),
@@ -1953,7 +2346,16 @@ const picker = document.createElement('input');
 picker.type = 'file'; picker.accept = 'image/*,.heic,.heif'; picker.className = 'picker';
 let pickCb = null;
 picker.addEventListener('change', () => { const f = picker.files[0], cb = pickCb; picker.value = ''; pickCb = null; if(f && cb) cb(f); });
+// Выбор файла материала тем же скрытым полем (правки 2.7): поле вне экрана, поэтому живое обновление,
+// пришедшее, пока открыто окно выбора файла, не теряет выбранный файл
+function pickFile(accept, cb){
+  picker.accept = accept;
+  pickCb = cb;
+  (dlg.open ? dlg : document.body).appendChild(picker);
+  picker.click();
+}
 function pickPhoto(cb){
+  picker.accept = 'image/*,.heic,.heif';
   pickCb = cb;
   (dlg.open ? dlg : document.body).appendChild(picker);
   picker.click();
@@ -2447,6 +2849,7 @@ document.addEventListener('click', async e => {
       document.querySelectorAll('.pl-rates button').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.r === d.r)));
       break;
     }
+    case 'mat-pick': { const id = r.id; pickFile(d.accept, f => { if(route().name === 'm' && route().id === id) pickMedia(f); }); break; }
     case 'mat-file-del': {
       const m = byId('materials', d.id); if(!m) return;
       openForm({title: 'Убрать файл?', text: `Файл материала «${m.title}» удалится с сервера. Вернуть его можно только новой загрузкой.`, submit: 'Убрать', danger: true,
@@ -2455,6 +2858,13 @@ document.addEventListener('click', async e => {
           await loadAll(['materials']);
           render(true); loadMediaUsage(); toast('Файл убран');
         }});
+      break;
+    }
+    case 'mat-pdf-info': {
+      a.disabled = true; UI.up = 1; toast('Считаю страницы…');
+      try { await pdfInfo(d.id); await loadAll(['materials']); toast('Готово: страницы посчитаны'); }
+      catch(err){ toast('Не получилось: ' + pdfErr(err)); }
+      finally { UI.up = 0; render(true); }
       break;
     }
     case 'new-group': openNewGroup(); break;
@@ -2521,11 +2931,6 @@ document.addEventListener('change', async e => {
   const t = e.target;
   if(t.name === 'p-theme'){ setTheme(t.value); return; }
   if(t.name === 'f-parent' && UI.form){ UI.form.parent = t.value; return; }
-  if(t.id === 'mat-file'){
-    const file = t.files[0]; t.value = '';
-    if(file) pickMedia(file);
-    return;
-  }
   // ползунок перемотки: ведём пальцем без перескоков, переходим при отпускании
   if(t.classList && t.classList.contains('pl-seek')){
     PL.seeking = false;

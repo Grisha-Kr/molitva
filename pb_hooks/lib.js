@@ -383,7 +383,7 @@ function mailPolish(e, kind) {
 // Опубликованный материал должен быть готов к показу: у текста есть текст, у ссылки адрес,
 // у аудио и видео загружен файл. Пока материал не опубликован, достаточно названия и вида:
 // так можно создать запись в панели, потом загрузить к ней файл в приложении и только затем опубликовать.
-const MAT_KIND_RU = { text: "Текст", audio: "Аудио", video: "Видео", link: "Ссылка" };
+const MAT_KIND_RU = { text: "Текст", audio: "Аудио", video: "Видео", link: "Ссылка", pdf: "PDF" };
 function checkMaterial(e) {
   const r = e.record;
   const title = r.getString("title").trim();
@@ -391,7 +391,7 @@ function checkMaterial(e) {
   r.set("title", title);
   r.set("summary", r.getString("summary").trim());
   const kind = r.getString("kind");
-  if (!MAT_KIND_RU[kind]) throw new BadRequestError("Выберите вид материала: text, audio, video или link.");
+  if (!MAT_KIND_RU[kind]) throw new BadRequestError("Выберите вид материала: text, audio, video, pdf или link.");
   const url = r.getString("url").trim();
   if (url && !/^https?:\/\/\S+$/.test(url)) throw new BadRequestError("Адрес ссылки должен начинаться с http:// или https://");
   r.set("url", url);
@@ -402,7 +402,7 @@ function checkMaterial(e) {
   if (kind === "link" && !url) {
     throw new BadRequestError("У материала-ссылки пустое поле url: впишите адрес или снимите публикацию.");
   }
-  if ((kind === "audio" || kind === "video") && !r.getString("media")) {
+  if (MEDIA[kind] && !r.getString("media")) {
     throw new BadRequestError(`${MAT_KIND_RU[kind]}: файл ещё не загружен. Сохраните материал без публикации, загрузите файл в приложении на вкладке «Материалы», потом поставьте «published».`);
   }
 }
@@ -421,6 +421,7 @@ function checkMaterialMark(e) {
 const MEDIA = {
   audio: { ru: "Аудио", ext: ["mp3", "m4a"], max: 100 * MB, about: "MP3 или M4A до 100 МБ" },
   video: { ru: "Видео", ext: ["mp4"], max: 1024 * MB, about: "MP4 (H.264 и AAC) до 1 ГБ" },
+  pdf: { ru: "PDF", ext: ["pdf"], max: 100 * MB, about: "PDF до 100 МБ" },
 };
 const MEDIA_TTL = 2 * 3600;        // сколько живёт ссылка на файл
 const MEDIA_COOKIE = "mol_media";  // кука, привязанная к вошедшему человеку
@@ -517,6 +518,75 @@ function visibleMaterial(userId, materialId) {
   }
   return m;
 }
+/* ---------- PDF в материалах (правки 2.7, часть Б) ---------- */
+const mediaPath = (name) => $filepath.join(mediaDir(), name);
+function fileSize(path) { try { return $os.stat(path).size(); } catch (_) { return 0; } }
+function hasCmd(name) {
+  try { $os.cmd("sh", "-c", 'command -v "$1" >/dev/null', "sh", name).run(); return true; } catch (_) { return false; }
+}
+// Действительно ли файл PDF: смотрим на содержимое, а не на имя. У PDF в первых 1024 байтах стоит «%PDF-».
+function looksLikePdf(path) {
+  try { return toString($os.cmd("head", "-c", "1024", path).output()).indexOf("%PDF-") >= 0; } catch (_) { return false; }
+}
+// Пересобрать PDF так, чтобы описания страниц лежали вместе (qpdf, «потоки объектов»), как в «Библиотеке».
+// Без этого в части файлов (сканы, PDF из простых программ) описание каждой страницы лежит рядом с её картинкой,
+// и читалка, чтобы найти страницу 150, скачивает почти весь файл. Содержимое страниц не меняется.
+// Если qpdf на сервере нет или он не справился (повреждённый или защищённый паролем файл), остаётся исходный файл.
+function optimizePdf(path) {
+  if (!hasCmd("qpdf")) return false;
+  const tmp = path + ".qpdf";
+  try {
+    try { $os.cmd("timeout", "600", "qpdf", "--object-streams=generate", "--stream-data=preserve", "--deterministic-id", path, tmp).run(); }
+    catch (err) { if (!/exit status 3/.test(String(err))) throw err; } // 3 = предупреждения, файл готов
+    if (fileSize(tmp) <= 0 || !looksLikePdf(tmp)) throw new Error("пустой файл");
+    $os.rename(tmp, path);
+    return true;
+  } catch (err) {
+    try { $os.remove(tmp); } catch (_) {}
+    $app.logger().warn("qpdf не пересобрал PDF, оставлен исходный файл", "file", path, "error", String(err));
+    return false;
+  }
+}
+
+/* ---------- Отдача PDF частями ---------- */
+const MAX_SPAN = 4 * MB; // больше за один запрос не отдаём: читалка просит куски по 512 КБ
+function parseRange(h, size) {
+  const m = /^bytes=(\d*)-(\d*)$/.exec(String(h || "").trim());
+  if (!m || size <= 0) return null;
+  let start, end;
+  if (m[1] === "") {
+    const n = parseInt(m[2], 10);
+    if (!n) return null;
+    start = Math.max(0, size - n); end = size - 1;
+  } else {
+    start = parseInt(m[1], 10);
+    end = m[2] === "" ? size - 1 : Math.min(parseInt(m[2], 10), size - 1);
+  }
+  if (!(start >= 0) || start > end || start >= size) return null;
+  return { start, end, len: end - start + 1 };
+}
+// Отдать ровно этот кусок файла. e.fileFS отдаёт файл стандартной функцией Go (http.ServeContent), а она смотрит
+// на заголовки запроса: при If-Range, который не совпал, отдаёт файл целиком вместо куска. Поэтому сервер сам ставит
+// Range «от и до» и убирает условные заголовки (как в «Библиотеке», правки 4.8).
+const COND_HEADERS = ["If-Range", "If-Match", "If-None-Match", "If-Modified-Since", "If-Unmodified-Since"];
+function serveRange(e, dir, name, range) {
+  const h = e.request.header;
+  for (const k of COND_HEADERS) h.del(k);
+  h.set("Range", `bytes=${range.start}-${range.end}`);
+  return e.fileFS($os.dirFS(dir), name);
+}
+// Файл открывают как страницу: адрес вставили в новую вкладку, «Сохранить ссылку как», рамка на странице.
+// Браузеры сообщают это заголовками Sec-Fetch-Dest и Sec-Fetch-Mode. Читалка просит файл из кода страницы
+// (Sec-Fetch-Dest: empty), её это не касается. Запросы без этих заголовков проходят: их проверяют ключ и кука.
+const PAGE_DEST = { document: 1, iframe: 1, frame: 1, embed: 1, object: 1 };
+function refuseAsPage(e, text) {
+  const h = e.request.header;
+  const words = (name) => (h.values(name) || []).join(",").toLowerCase().split(",").map((x) => x.trim()).filter(Boolean);
+  if (words("Sec-Fetch-Dest").some((d) => PAGE_DEST[d]) || words("Sec-Fetch-Mode").indexOf("navigate") >= 0) {
+    throw new ForbiddenError(text || "PDF открывается только в приложении, на вкладке «Материалы».");
+  }
+}
+
 // Файл материала удаляется вместе с материалом и при замене на новый
 function deleteMedia(name) {
   if (!name) return;
@@ -532,4 +602,5 @@ module.exports = {
   MAT_KIND_RU, checkMaterial, checkMaterialMark,
   MEDIA, MEDIA_TTL, MEDIA_COOKIE, mediaDir, mediaFs, mediaKey, freeBytes, minFreeBytes, mediaName,
   requireAdmin, cookieValue, setMediaCookie, mediaLink, mediaUser, visibleMaterial, deleteMedia,
+  mediaPath, fileSize, looksLikePdf, optimizePdf, MAX_SPAN, parseRange, serveRange, refuseAsPage,
 };

@@ -705,3 +705,23 @@ dialog form{display:flex;flex-direction:column;max-height:calc(100dvh - 32px)}
 .shot-dlg::backdrop{background:rgb(0 0 0 / .8)}
 .shot-x{position:absolute;top:6px;right:6px;width:44px;height:44px;border-radius:50%;background:rgb(0 0 0 / .55);color:#fff;font-size:26px}
 .msg-from .usr-msgs{flex-basis:100%;margin:-4px 0 -8px}
+
+/* Читалка PDF (правки 2.7): на весь экран, страницы подряд сверху вниз */
+html.pdfr-on{overflow:hidden}
+.pdfr{position:fixed;inset:0;z-index:50;display:flex;flex-direction:column;background:#DAD7CF;color:var(--ink);-webkit-user-select:none;user-select:none;-webkit-touch-callout:none}
+:root[data-theme="dark"] .pdfr{background:#0E0F0D}
+@media (prefers-color-scheme: dark){ :root:not([data-theme="light"]) .pdfr{background:#0E0F0D} }
+.pdfr-bar{flex:none;display:flex;align-items:center;gap:4px;padding:calc(4px + env(safe-area-inset-top,0px)) calc(6px + env(safe-area-inset-right,0px)) 4px calc(6px + env(safe-area-inset-left,0px));background:var(--nav);border-bottom:1px solid var(--line)}
+.pdfr-btn{appearance:none;border:0;background:none;min-height:44px;padding:0 10px;border-radius:10px;font:inherit;font-size:15px;font-weight:700;color:var(--accent-text);cursor:pointer;white-space:nowrap}
+.pdfr-page{flex:1;min-width:0;color:var(--ink);font-weight:600;overflow:hidden;text-overflow:ellipsis;font-variant-numeric:tabular-nums}
+.pdfr-zoom{display:flex;flex:none}
+.pdfr-zoom .icon-btn{font-size:26px;font-weight:500}
+.pdfr-zoom .icon-btn:disabled{opacity:.3;cursor:default}
+.pdfr-scroll{position:relative;flex:1;min-height:0;overflow:auto;overflow-anchor:none;overscroll-behavior:contain;-webkit-overflow-scrolling:touch;touch-action:pan-x pan-y;outline:none}
+.pdfr-pages{--pw:300px;--ar:.707;display:flex;flex-direction:column;align-items:center;gap:10px;width:max-content;min-width:100%;padding:8px 8px calc(24px + env(safe-area-inset-bottom,0px))}
+.pdfr-pg{flex:none;width:var(--pw);height:calc(var(--pw) / var(--ar));background:#fff;box-shadow:0 1px 4px rgb(0 0 0 / .25);overflow:hidden}
+.pdfr-pg canvas{display:block;width:100%;height:100%}
+.pdfr-msg{position:absolute;inset:60px 0 0;display:grid;place-items:center;padding:20px;pointer-events:none}
+.pdfr-msg-box{pointer-events:auto;max-width:340px;background:var(--card);border-radius:16px;padding:18px;display:flex;flex-direction:column;gap:12px;text-align:center;box-shadow:0 12px 40px rgb(0 0 0 / .25);-webkit-user-select:text;user-select:text}
+@media print{ html.pdfr-on body > *{display:none!important} }
+.mat-pic.pdf img{object-position:50% 0}

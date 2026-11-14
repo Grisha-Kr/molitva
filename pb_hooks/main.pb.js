@@ -122,13 +122,19 @@ onRecordCreateRequest((e) => { require(`${__hooks}/lib.js`).checkMaterial(e); e.
 onRecordUpdateRequest((e) => {
   const lib = require(`${__hooks}/lib.js`);
   lib.checkMaterial(e);
-  // вид поменяли с аудио или видео на текст или ссылку: файл больше не нужен и не должен лежать на диске впустую
-  const was = e.record.original().getString("media");
+  // вид поменяли (например, с аудио на текст или с PDF на видео): прежний файл больше не подходит
+  // и не должен лежать на диске впустую
+  const orig = e.record.original();
+  const was = orig.getString("media");
   const kind = e.record.getString("kind");
-  if (was && kind !== "audio" && kind !== "video") {
+  const rules = lib.MEDIA[kind];
+  if (was && !(rules && rules.ext.indexOf(was.split(".").pop().toLowerCase()) >= 0)) {
     e.record.set("media", "");
     e.record.set("media_size", 0);
   }
+  if (!e.record.getString("media") || kind !== "pdf") e.record.set("pages", 0);
+  // обложку поменяли или убрали в панели: она больше не «из первой страницы PDF», и замена файла её не тронет
+  if (e.record.getUnsavedFiles("cover").length || e.record.getString("cover") !== orig.getString("cover")) e.record.set("cover_auto", false);
   e.next();
   if (was && !e.record.getString("media")) lib.deleteMedia(was);
 }, "materials");
@@ -154,7 +160,8 @@ routerAdd("GET", "/api/molitva/materials/{id}/media-link", (e) => {
   require(`${__hooks}/access_lib.js`).requireMaterials(e.auth.id);
   const m = lib.visibleMaterial(e.auth.id, e.request.pathValue("id"));
   if (!m.getString("media")) throw new NotFoundError("У этого материала ещё нет файла.");
-  return e.json(200, { url: lib.mediaLink(e, m.id, e.auth.id), ttl: lib.MEDIA_TTL });
+  // size нужен читалке PDF: она просит файл кусками и должна знать его длину заранее
+  return e.json(200, { url: lib.mediaLink(e, m.id, e.auth.id), ttl: lib.MEDIA_TTL, size: m.getInt("media_size"), kind: m.getString("kind") });
 }, $apis.requireAuth("users"));
 
 // Отдача файла. Вход проверяется двумя способами сразу: подписанный ключ в адресе и кука.
@@ -170,6 +177,15 @@ routerAdd("GET", "/api/molitva/media/{id}", (e) => {
   e.response.header().set("Cache-Control", "private, no-store");
   e.response.header().set("Content-Disposition", "inline");
   e.response.header().set("X-Content-Type-Options", "nosniff");
+  // PDF (правки 2.7): только кусками для читалки приложения. Открыть адрес во вкладке или скачать целиком нельзя.
+  if (m.getString("kind") === "pdf") {
+    lib.refuseAsPage(e);
+    const range = lib.parseRange(e.request.header.get("Range"), lib.fileSize(lib.mediaPath(name)));
+    if (!range) throw new BadRequestError("PDF открывается только в приложении, на вкладке «Материалы».");
+    if (range.len > lib.MAX_SPAN) throw new BadRequestError("Слишком большой кусок файла за один раз.");
+    e.response.header().set("Content-Type", "application/octet-stream");
+    return lib.serveRange(e, lib.mediaDir(), name, range);
+  }
   return e.fileFS($os.dirFS(lib.mediaDir()), name);
 });
 
@@ -183,7 +199,7 @@ routerAdd("POST", "/api/molitva/materials/{id}/media", (e) => {
   if (!m) throw new NotFoundError("Материал не найден.");
   const kind = m.getString("kind");
   const rules = lib.MEDIA[kind];
-  if (!rules) throw new BadRequestError("Файл можно загрузить только к материалу вида audio или video.");
+  if (!rules) throw new BadRequestError("Файл можно загрузить только к материалу вида audio, video или pdf.");
 
   const files = e.findUploadedFiles("file");
   if (!files.length) throw new BadRequestError("Файл не выбран.");
@@ -202,15 +218,52 @@ routerAdd("POST", "/api/molitva/materials/{id}/media", (e) => {
   const fs = lib.mediaFs();
   try { fs.uploadFile(file, name); } finally { fs.close(); }
 
+  let size = file.size;
+  if (kind === "pdf") {
+    // по содержимому, а не по имени: картинка или текст под именем .pdf не пройдёт
+    if (!lib.looksLikePdf(lib.mediaPath(name))) {
+      lib.deleteMedia(name);
+      throw new BadRequestError("Это не PDF: у файла расширение .pdf, но внутри другое содержимое. Сохраните документ как PDF и загрузите снова.");
+    }
+    // пересборка для быстрого открытия по кускам (если на сервере есть qpdf); не получилось, файл остаётся как был
+    lib.optimizePdf(lib.mediaPath(name));
+    size = lib.fileSize(lib.mediaPath(name)) || size;
+    m.set("pages", 0); // страницы нового файла посчитает приложение администратора (маршрут pdf-info)
+  }
+
   const dur = parseInt((e.requestInfo().body || {}).duration, 10);
   m.set("media", name);
-  m.set("media_size", file.size);
+  m.set("media_size", size);
   if (!m.getInt("duration") && dur > 0) m.set("duration", dur);
   try { $app.save(m); } catch (err) { lib.deleteMedia(name); throw err; }
   lib.deleteMedia(old); // прежний файл больше не нужен
 
-  return e.json(200, { media: name, size: file.size, duration: m.getInt("duration") });
+  return e.json(200, { media: name, size, duration: m.getInt("duration") });
 }, $apis.requireAuth("users"), $apis.bodyLimit(1100 * 1024 * 1024));
+
+// Число страниц PDF и обложка из первой страницы. Их после загрузки файла считает приложение администратора
+// (оно всё равно умеет рисовать PDF) и присылает сюда. Обложка ставится, только если у материала её нет
+// или прежняя тоже сделана из первой страницы (cover_auto): загруженную вручную сервер не трогает.
+routerAdd("POST", "/api/molitva/materials/{id}/pdf-info", (e) => {
+  const lib = require(`${__hooks}/lib.js`);
+  lib.requireAdmin(e);
+  let m = null;
+  try { m = $app.findRecordById("materials", e.request.pathValue("id")); } catch (_) {}
+  if (!m) throw new NotFoundError("Материал не найден.");
+  if (m.getString("kind") !== "pdf" || !m.getString("media")) throw new BadRequestError("У этого материала нет файла PDF.");
+  const pages = parseInt((e.requestInfo().body || {}).pages, 10);
+  if (!(pages >= 1 && pages <= 100000)) throw new BadRequestError("Число страниц не определилось.");
+  m.set("pages", pages);
+  let files = [];
+  try { files = e.findUploadedFiles("cover") || []; } catch (_) { files = []; }
+  if (files.length && (!m.getString("cover") || m.getBool("cover_auto"))) {
+    m.set("cover", files[0]);
+    m.set("cover_auto", true);
+  }
+  try { $app.save(m); }
+  catch (err) { if (/cover/.test(String(err))) throw new BadRequestError("Обложка не сохранилась: нужна картинка JPEG до 5 МБ."); throw err; }
+  return e.json(200, { pages, cover: m.getString("cover"), cover_auto: m.getBool("cover_auto") });
+}, $apis.requireAuth("users"), $apis.bodyLimit(8 * 1024 * 1024));
 
 // Убрать файл у материала (только администратор). У опубликованного материала сначала снимают публикацию.
 routerAdd("DELETE", "/api/molitva/materials/{id}/media", (e) => {
@@ -223,6 +276,7 @@ routerAdd("DELETE", "/api/molitva/materials/{id}/media", (e) => {
   const name = m.getString("media");
   m.set("media", "");
   m.set("media_size", 0);
+  m.set("pages", 0);
   $app.save(m);
   lib.deleteMedia(name);
   return e.json(200, { ok: true });
